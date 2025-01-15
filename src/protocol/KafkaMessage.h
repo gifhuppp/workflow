@@ -29,7 +29,6 @@
 #include "ProtocolMessage.h"
 #include "KafkaDataTypes.h"
 
-
 namespace protocol
 {
 
@@ -59,6 +58,9 @@ public:
 
 	void set_api_version(int ver) { this->api_version = ver; }
 	int get_api_version() const { return this->api_version; }
+
+	void set_correlation_id(int id) { this->correlation_id = id; }
+	int get_correlation_id() const { return this->correlation_id; }
 
 	void set_config(const KafkaConfig& conf)
 	{
@@ -121,7 +123,7 @@ public:
 		this->api = api;
 	}
 
-	void duplicate(KafkaMessage& msg)
+	void duplicate(const KafkaMessage& msg)
 	{
 		this->config = msg.config;
 		this->cgroup = msg.cgroup;
@@ -197,9 +199,8 @@ protected:
 
 	int api_type;
 	int api_version;
+	int correlation_id;
 	int message_version;
-
-	std::map<int, int> api_mver_map;
 
 	void *compress_env;
 	size_t cur_size;

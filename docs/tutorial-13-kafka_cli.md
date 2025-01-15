@@ -28,8 +28,10 @@ Bazel：执行bazel build kafka 编译支持kafka协议的类库；执行bazel b
 
 其中broker_url可以有多个url组成，多个url之间以,分割
 
-- 形式如：kafka://host:port,kafka://host1:port...
-- port默认为9092;
+- 形式如：kafka://host:port,kafka://host1:port... 或：**kafkas**://host:port,**kafkas**://host1:port代表使用SSL通信。
+- port的默认值在普通TCP连接下是9092，SSL下为9093。
+- "kafka://"前缀可以缺省。这时候使用默认使用TCL通信。
+- 多个url，必须都采用TCP或都采用SSL。否则init函数返回-1，错误码为EINVAL。
 - 如果用户在这一层有upstream选取需求，可以参考[upstream文档](../docs/about-upstream.md)。
 
 Kafka broker_url示例：
@@ -39,6 +41,12 @@ kafka://127.0.0.1/
 kafka://kafka.host:9090/
 
 kafka://10.160.23.23:9000,10.123.23.23,kafka://kafka.sogou
+
+kafkas://broker1.kafka.sogou,kafkas://broker2.kafka.sogou
+
+错误的url示例（第一个broker为SSL，第二个broker非SSL）：
+
+kafkas://broker1.kafka.sogou,broker2.kafka.sogou
 
 # 实现原理和特性
 
@@ -95,7 +103,7 @@ fetch_timeout | int | 100ms | fetch的超时时间
 fetch_min_bytes | int | 1 byte | 一次fetch通信最小消息的长度
 fetch_max_bytes | int | 50M bytes | 一次fetch通信最大消息的长度
 fetch_msg_max_bytes | int | 1M bytes | 一次fetch通信单个消息的最大长度
-offset_timestamp | long long int | -2 | 消费者组模式下，没有找到历史offset时，初始化的offset，-2表示最久，-1表示最新
+offset_timestamp | long long int | -1 | 消费者组模式下，没有找到历史offset时，初始化的offset，-2表示最久，-1表示最新
 session_timeout | int | 10s | 加入消费者组初始化时的超时时间
 rebalance_timeout | int | 10s | 加入消费者组同步信息阶段的超时时间
 produce_acks | int | -1 | produce任务在返回之前应确保消息成功复制的broker节点数，-1表示所有的复制broker节点

@@ -28,10 +28,12 @@
 #include <mutex>
 #include <condition_variable>
 #include <openssl/ssl.h>
+#include "EndpointParams.h"
 #include "WFTaskFactory.h"
 
 struct WFServerParams
 {
+	enum TransportType transport_type;
 	size_t max_connections;
 	int peer_response_timeout;	/* timeout of each read or write operation */
 	int receive_timeout;	/* timeout of receiving the whole message */
@@ -42,6 +44,7 @@ struct WFServerParams
 
 static constexpr struct WFServerParams SERVER_PARAMS_DEFAULT =
 {
+	.transport_type			=	TT_TCP,
 	.max_connections		=	2000,
 	.peer_response_timeout	=	10 * 1000,
 	.receive_timeout		=	-1,
@@ -156,7 +159,12 @@ public:
 		return -1;
 	}
 
+	const struct WFServerParams *get_params() const { return &this->params; }
+
 protected:
+	/* Override this function to create the initial SSL CTX of the server */
+	virtual SSL_CTX *new_ssl_ctx(const char *cert_file, const char *key_file);
+
 	/* Override this function to implement server that supports TLS SNI.
 	 * "servername" will be NULL if client does not set a host name.
 	 * Returning NULL to indicate that servername is not supported. */
@@ -165,19 +173,20 @@ protected:
 		return this->get_ssl_ctx();
 	}
 
+	/* This can be used by the implementation of 'new_ssl_ctx'. */
+	static int ssl_ctx_callback(SSL *ssl, int *al, void *arg);
+
 protected:
 	WFServerParams params;
 
 protected:
+	virtual int create_listen_fd();
 	virtual WFConnection *new_connection(int accept_fd);
 	void delete_connection(WFConnection *conn);
 
 private:
 	int init(const struct sockaddr *bind_addr, socklen_t addrlen,
 			 const char *cert_file, const char *key_file);
-	int init_ssl_ctx(const char *cert_file, const char *key_file);
-	static long ssl_ctx_callback(SSL *ssl, int *al, void *arg);
-	virtual int create_listen_fd();
 	virtual void handle_unbound();
 
 protected:

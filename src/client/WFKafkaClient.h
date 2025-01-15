@@ -19,14 +19,13 @@
 #ifndef _WFKAFKACLIENT_H_
 #define _WFKAFKACLIENT_H_
 
-
 #include <string>
 #include <vector>
 #include <functional>
+#include <openssl/ssl.h>
+#include "WFTask.h"
 #include "KafkaMessage.h"
 #include "KafkaResult.h"
-#include "KafkaTaskImpl.inl"
-
 
 class WFKafkaTask;
 class WFKafkaClient;
@@ -54,7 +53,7 @@ public:
 		protocol::KafkaToppar toppar;
 		toppar.set_topic_partition(record.get_topic(), record.get_partition());
 		toppar.set_offset(record.get_offset());
-		toppar.set_error(KAFKA_NONE);
+		toppar.set_error(0);
 		this->toppar_list.add_item(std::move(toppar));
 	}
 
@@ -63,8 +62,18 @@ public:
 		protocol::KafkaToppar toppar_t;
 		toppar_t.set_topic_partition(toppar.get_topic(), toppar.get_partition());
 		toppar_t.set_offset(toppar.get_offset());
-		toppar_t.set_error(KAFKA_NONE);
+		toppar_t.set_error(0);
 		this->toppar_list.add_item(std::move(toppar_t));
+	}
+
+	void add_commit_item(const std::string& topic, int partition,
+						 long long offset)
+	{
+		protocol::KafkaToppar toppar;
+		toppar.set_topic_partition(topic, partition);
+		toppar.set_offset(offset);
+		toppar.set_error(0);
+		this->toppar_list.add_item(std::move(toppar));
 	}
 
 	void set_api_type(int api_type)
@@ -92,6 +101,11 @@ public:
 		return &this->result;
 	}
 
+	int get_kafka_error() const
+	{
+		return this->kafka_error;
+	}
+
 	void set_callback(kafka_callback_t cb)
 	{
 		this->callback = std::move(cb);
@@ -105,7 +119,7 @@ protected:
 		this->finish = false;
 	}
 
-	virtual ~WFKafkaTask() {}
+	virtual ~WFKafkaTask() { }
 
 	virtual SubTask *done();
 
@@ -117,6 +131,7 @@ protected:
 	kafka_callback_t callback;
 	kafka_partitioner_t partitioner;
 	int api_type;
+	int kafka_error;
 	int retry_max;
 	bool finish;
 
@@ -131,9 +146,22 @@ public:
 	// example: kafka://kafka.sogou
 	// example: kafka.sogou:9090
 	// example: kafka://10.160.23.23:9000,10.123.23.23,kafka://kafka.sogou
-	int init(const std::string& broker_url);
+	// example: kafkas://kafka.sogou  ->  kafka over TLS
+	int init(const std::string& broker_url)
+	{
+		return this->init(broker_url, NULL);
+	}
 
-	int init(const std::string& broker_url, const std::string& group);
+	int init(const std::string& broker_url, const std::string& group)
+	{
+		return this->init(broker_url, group, NULL);
+	}
+
+	// With a specific SSL_CTX. Effective only on brokers over TLS.
+	int init(const std::string& broker_url, SSL_CTX *ssl_ctx);
+
+	int init(const std::string& broker_url, const std::string& group,
+			 SSL_CTX *ssl_ctx);
 
 	int deinit();
 
@@ -159,7 +187,7 @@ public:
 
 private:
 	class KafkaMember *member;
-	friend class ComplexKafkaTask;
+	friend class KafkaClientTask;
 };
 
 #endif

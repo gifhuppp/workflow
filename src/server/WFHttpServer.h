@@ -30,6 +30,7 @@ using WFHttpServer = WFServer<protocol::HttpRequest,
 
 static constexpr struct WFServerParams HTTP_SERVER_PARAMS_DEFAULT =
 {
+	.transport_type			=	TT_TCP,
 	.max_connections		=	2000,
 	.peer_response_timeout	=	10 * 1000,
 	.receive_timeout		=	-1,
@@ -38,15 +39,15 @@ static constexpr struct WFServerParams HTTP_SERVER_PARAMS_DEFAULT =
 	.ssl_accept_timeout		=	10 * 1000,
 };
 
-template<>
-inline WFHttpServer::WFServer(http_process_t proc) :
+template<> inline
+WFHttpServer::WFServer(http_process_t proc) :
 	WFServerBase(&HTTP_SERVER_PARAMS_DEFAULT),
 	process(std::move(proc))
 {
 }
 
-template<>
-inline CommSession *WFHttpServer::new_session(long long seq, CommConnection *conn)
+template<> inline
+CommSession *WFHttpServer::new_session(long long seq, CommConnection *conn)
 {
 	WFHttpTask *task;
 

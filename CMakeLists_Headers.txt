@@ -32,9 +32,6 @@ else ()
 endif ()
 
 set(INCLUDE_HEADERS
-	src/algorithm/DnsRoutine.h
-	src/algorithm/MapReduce.h
-	src/algorithm/MapReduce.inl
 	src/protocol/ProtocolMessage.h
 	src/protocol/http_parser.h
 	src/protocol/HttpMessage.h
@@ -55,6 +52,7 @@ set(INCLUDE_HEADERS
 	src/protocol/dns_parser.h
 	src/protocol/DnsMessage.h
 	src/protocol/DnsUtil.h
+	src/protocol/TLVMessage.h
 	src/protocol/ConsulDataTypes.h
 	src/server/WFServer.h
 	src/server/WFDnsServer.h
@@ -62,6 +60,7 @@ set(INCLUDE_HEADERS
 	src/server/WFRedisServer.h
 	src/server/WFMySQLServer.h
 	src/client/WFMySQLConnection.h
+	src/client/WFRedisSubscriber.h
 	src/client/WFConsulClient.h
 	src/client/WFDnsClient.h
 	src/manager/DnsCache.h
@@ -77,7 +76,6 @@ set(INCLUDE_HEADERS
 	src/util/LRUCache.h
 	src/util/StringUtil.h
 	src/util/URIParser.h
-	src/util/MD5Util.h
 	src/factory/WFConnection.h
 	src/factory/WFTask.h
 	src/factory/WFTask.inl
@@ -90,6 +88,8 @@ set(INCLUDE_HEADERS
 	src/factory/Workflow.h
 	src/factory/WFOperator.h
 	src/factory/WFResourcePool.h
+	src/factory/WFMessageQueue.h
+	src/factory/RedisTaskImpl.inl
 	src/nameservice/WFNameService.h
 	src/nameservice/WFDnsResolver.h
 	src/nameservice/WFServiceGovernance.h

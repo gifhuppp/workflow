@@ -29,8 +29,9 @@ The program exists automatically after all the tasks are completed, and all the 
 
 In the command, the broker_url may contain several urls seperated by comma(,).
 
-- For instance, kafka://host:port,kafka://host1:port...
-- The default value is 9092;
+- For instance, kafka://host:port,kafka://host1:port... or: **kafkas**://host:port,**kafkas**://host1:port for kafka over SSL;
+- The default port is 9092 for TCP and 9093 for SSL;
+- Do not mix 'kafkas://' with "kafka://", otherwise the init function will fail with errno EINVAL;
 - If you want to use upstream policy at this layer, please refer to [upstream documents](/docs/en/about-upstream.md).
 
 The following are several Kafka broker_url samples:
@@ -40,6 +41,12 @@ kafka://127.0.0.1/
 kafka://kafka.host:9090/
 
 kafka://10.160.23.23:9000,10.123.23.23,kafka://kafka.sogou
+
+kafkas://broker1.kafka.sogou,kafkas://broker2.kafka.sogou
+
+Illegal broker_url sample (The first one is SSL, and the second one is not):
+
+kafkas://broker1.kafka.sogou,broker2.kafka.sogou
 
 # Principles and Features
 
@@ -103,7 +110,7 @@ fetch_timeout | int | 100ms | Maximum timeout for fetch.
 fetch_min_bytes | int | 1 byte | Minimum length of messages in one fetch communication. 
 fetch_max_bytes | int | 50M bytes | Maximum length of messages in one fetch communication. 
 fetch_msg_max_bytes | int | 1M bytes | Maximum length of one single message in a fetch communication. 
-offset_timestamp | long long int | -2 | Initialized offfset in the consumer group mode when there is no offset history. -2 means the oldest offset; -1 means the latest offset. 
+offset_timestamp | long long int | -1 | Initialized offfset in the consumer group mode when there is no offset history. -2 means the oldest offset; -1 means the latest offset. 
 session_timeout | int | 10s | Maximum initialization timeout for joining a consumer group. 
 rebalance_timeout | int | 10s | Maximum timeout for synchronizing a consumer group information after a client joins the consumer group. 
 produce_acks | int | -1 | Number of brokers to ensure the successful replication of a message before the return of a produce task. -1 indicates all replica brokers. 

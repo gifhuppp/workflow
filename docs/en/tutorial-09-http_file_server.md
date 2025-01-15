@@ -7,7 +7,7 @@
 # About http\_file\_server
 
 http\_file\_server is a web server. You can start a web server after specifying the startup port and the root path (the default setting is the current path).   
-You can also specify a certificate file and a key file in PEM format to start an HTTPS web server.   
+You can also specify a certificate file and a key file in PEM format to start an HTTPS web server. User may access the server through command line, the request will be sent to IP address 127.0.0.1.  
 The program mainly demonstrates how to use disk IO tasks. In the Linux system, we use the aio interface in the kernel of Linux, and the file reading is completely asynchronous.
 
 # Starting a server
@@ -107,10 +107,10 @@ public:
                                             fio_callback_t callback);
 
     /* Interface with file path name */
-	static WFFileIOTask *create_pread_task(const std::string& pathname, void *buf, size_t count, off_t offset,
+	static WFFileIOTask *create_pread_task(const std::string& path, void *buf, size_t count, off_t offset,
                                            fio_callback_t callback);
 
-    static WFFileIOTask *create_pwrite_task(const std::string& pathname, void *buf, size_t count, off_t offset,
+    static WFFileIOTask *create_pwrite_task(const std::string& path, void *buf, size_t count, off_t offset,
                                             fio_callback_t callback);  
 };
 ~~~
@@ -149,11 +149,54 @@ The memory of the buf domain is managed by ourselves. You can use  **append\_out
 After the reply is completed, we will **free()** this block of memory with this line in the process:   
 server\_task->set\_callback(\[](WFHttpTask \*t){ free(t->user\_data); });
 
+# Interact with the server through command line
+
+After the server is started, users may access it through command line. Simply input the file name that you want to get, or input Ctrl-D to end the program. The repeating process is implemnted by using WFRepeaterTask, which can be created by this factory function:
+~~~cpp
+using repeated_create_t = std::function<SubTask *(WFRepeaterTask *)>;
+using repeater_callback_t = std::function<void (WFRpeaterTask *)>;
+
+class WFTaskFactory
+{
+    WFRpeaterTask *create_repeater_task(repeated_create_t create, repeater_callback_t callback);
+};
+~~~
+As above, a repeater task is created with a task creator function. The repeater calls the task creator repeatedly and run the task until the creator return a NULL pointer. When the using's input is not empty, our creator will create an HTTP task on IP 127.0.0.1 to access the server.  
+~~~cpp
+{
+	auto&& create = [&scheme, port](WFRepeaterTask *)->SubTask *{
+		...
+		scanf("%1023s", buf);
+		if (*buf == '\0')
+			return NULL;
+
+		std::string url = scheme + "127.0.0.1:" + std::to_string(port) + "/" + buf;
+		WFHttpTask *task = WFTaskFactory::create_http_task(url, 0, 0,
+									[](WFHttpTask *task) {
+			...
+		});
+
+		return task;
+	};
+	
+	WFFacilities::WaitGroup wg(1);
+	WFRepeaterTask *repeater;
+	repeater = WFTaskFactory::create_repeater_task(create, [&wg](WFRepeaterTask *) {
+		wg.done();
+	});
+
+	repeater->start();
+	wg.wait();
+
+	server.stop();
+}
+~~~
+Finally, when the creator returned NULL, the repeater's callback is called and the program will be ended.
+
 # About the implementation of the file IO
 
 Linux operating system supports a set of asynchronous IO system calls with high efficiency and very little CPU occupation. If you use our framework in a Linux system, this set of interfaces are used by default.   
 We have implemented a set of posix aio interfaces to support other UNIX systems, and used the sigevent notification method of threads, but it is no longer in use because of its low efficiency.   
 Currently, for non-Linux systems, asynchronous IO is always simulated by multi-threading. When an IO task arrives, a thread is created in real time to execute IO tasks, and then a callback is used to return to the handler thread pool.   
 Multi-threaded IO is also the only choice in macOS, because macOS does not have good sigevent support and posix aio will not work in macOS.   
-Multi-threaded IO does not support preadv and pwritev tasks. When these two tasks are created and run, you will get an ENOSYS error in the callback.   
 Some UNIX systems do not support fdatasync. In this case, an fdsync task is equivalent to an fsync task.

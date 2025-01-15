@@ -44,11 +44,10 @@ private:
 ### Serialization function: encode
 
 * The encode function is called before the message is sent, and it is called only once for each message.
-* In the encode function, you need to serialize the message into a vector array, and the number of array elements must not exceed max. Current the value of max is 8192.
+* In the encode function, you need to serialize the message into a vector array, and the number of array elements must not exceed max. Current the value of max is 2048.
 * For the definition of **struct iovec**, please see the system calls **readv** or **writev**.
 * Normally the return value of the encode function is between 0 and max, indicating how many vector are used in the message.
   * In case of UDP protocol, please note that the total length must not be more than 64k, and no more than 1024 vectors are used (in Linux, writev writes only 1024 vectors at one time).
-    * UDP protocol can only be used for a client, and UDP server cannot be realized.
 * The encode -1 indicates errors. To return -1, you need to set errno. If the return value is > max, you will get an EOVERFLOW error. All errors are obtained in the callback.
 * For performance reasons, the content pointed to by the iov\_base pointer in the vector will not be copied. So it generally points to the member of the message class.
 
@@ -153,7 +152,7 @@ int TutorialMessage::append(const void *buf, size_t size)
         return -1;
     }
 
-    memcpy(this->body, buf, body_left);
+    memcpy(this->body, buf, size);
     if (size < body_left)
         return 0;
 
@@ -202,8 +201,7 @@ Please see [server.cc](/tutorial/tutorial-10-user_defined_protocol/server.cc) fo
 
 # client
 
-The logic of the client is to receive the user input from standard IO, construct a request, send it to the server and get the results.   
-For simplicity, the process of reading standard input is completed in the callback, so we will send an empty request first. Also, for the sake of security, we limit the packet size of the server reply to 4KB.   
+The logic of the client is to receive the user input from standard IO, construct a request, send it to the server and get the results. Here we use WFRepeaterTask to implement the repeating process, terminates if the user's input is empty. For the sake of security, we limit the packet size of the server reply to 4KB.   
 The only thing that a client needs to know is how to generate a client task on a user-defined protocol. There are three interface options in [WFTaskFactory.h](/src/factory/WFTaskFactory.h):
 
 ~~~cpp
@@ -211,30 +209,37 @@ template<class REQ, class RESP>
 class WFNetworkTaskFactory
 {
 private:
-    using T = WFNetworkTask<REQ, RESP>;
+	using T = WFNetworkTask<REQ, RESP>;
 
 public:
-    static T *create_client_task(TransportType type,
-                                 const std::string& host,
-                                 unsigned short port,
-                                 int retry_max,
-                                 std::function<void (T *)> callback);
+	static T *create_client_task(TransportType type,
+								 const std::string& host,
+								 unsigned short port,
+								 int retry_max,
+								 std::function<void (T *)> callback);
 
-    static T *create_client_task(TransportType type,
-                                 const std::string& url,
-                                 int retry_max,
-                                 std::function<void (T *)> callback);
+	static T *create_client_task(TransportType type,
+								 const std::string& url,
+								 int retry_max,
+								 std::function<void (T *)> callback);
 
-    static T *create_client_task(TransportType type,
-                                 const URI& uri,
-                                 int retry_max,
-                                 std::function<void (T *)> callback);
+	static T *create_client_task(TransportType type,
+								 const ParsedURI& uri,
+								 int retry_max,
+								 std::function<void (T *)> callback);
+
+	static T *create_client_task(TransportType type,
+								 const struct sockaddr *addr,
+								 socklen_t addrlen,
+								 int retry_max,
+								 std::function<void (T *)> callback);
+
     ...
 };
 ~~~
 
 Among them, TransportType specifies the transport layer protocol, and the current options include TT\_TCP, TT\_UDP, TT\_SCTP, TT\_TCP\_SSL and TT\_SCTP\_SSL.   
-There is little difference between the three interfaces. In our example, the URL is not needed for the time being. We use a domain name and a port to create a task.   
+There is little difference between the interfaces. In our example, the URL is not needed for the time being. We use a domain name and a port to create a task.   
 The actual code is shown as follows. We inherited the WFTaskFactory class, but this derivation is not required.
 
 ~~~cpp
@@ -264,7 +269,7 @@ The previous examples have explained the knowledge in other codes of the above c
 
 # How is the request on an built-in protocol generated
 
-Currently, there are four built-in protocols in the framework: HTTP, Redis, MySQL and Kafka. Can we generate an HTTP or Redis task in the same way? For example:
+Currently, there are five built-in protocols in the framework: HTTP, Redis, MySQL, Kafka and DNS. Can we generate an HTTP or Redis task in the same way? For example:
 
 ~~~cpp
 WFHttpTask *task = WFNetworkTaskFactory<protocol::HttpRequest, protocol::HttpResponse>::create_client_task(...);

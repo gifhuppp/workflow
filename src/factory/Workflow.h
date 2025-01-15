@@ -92,11 +92,14 @@ public:
 	 * that belongs to the series. All subsequent tasks in the series will be
 	 * destroyed immediately and recursively (ParallelWork), without callback.
 	 * But the callback of this canceled series will still be called. */
-	void cancel() { this->canceled = true; }
+	virtual void cancel() { this->canceled = true; }
 
 	/* Parallel work's callback may check the cancellation state of each
 	 * sub-series, and cancel it's super-series recursively. */
 	bool is_canceled() const { return this->canceled; }
+
+	/* 'false' until the time of callback. Mainly for sub-class. */
+	bool is_finished() const { return this->finished; }
 
 public:
 	void set_callback(series_callback_t callback)
@@ -105,8 +108,13 @@ public:
 	}
 
 public:
-	/* The next 3 methods are intended for task implementations only. */
+	virtual void *get_specific(const char *key) { return NULL; }
+
+public:
+	/* The following functions are intended for task implementations only. */
 	SubTask *pop();
+
+	SubTask *get_last_task() const { return this->last; }
 
 	void set_last_task(SubTask *last)
 	{
@@ -116,6 +124,13 @@ public:
 
 	void unset_last_task() { this->last = NULL; }
 
+	const ParallelTask *get_in_parallel() const { return this->in_parallel; }
+
+protected:
+	void set_in_parallel(const ParallelTask *task) { this->in_parallel = task; }
+
+	void dismiss_recursive();
+
 protected:
 	void *context;
 	series_callback_t callback;
@@ -123,22 +138,23 @@ protected:
 private:
 	SubTask *pop_task();
 	void expand_queue();
-	void dismiss_recursive();
 
 private:
+	SubTask *buf[4];
 	SubTask *first;
 	SubTask *last;
 	SubTask **queue;
 	int queue_size;
 	int front;
 	int back;
-	bool in_parallel;
 	bool canceled;
+	bool finished;
+	const ParallelTask *in_parallel;
 	std::mutex mutex;
 
 protected:
 	SeriesWork(SubTask *first, series_callback_t&& callback);
-	virtual ~SeriesWork() { delete []this->queue; }
+	virtual ~SeriesWork();
 	friend class ParallelWork;
 	friend class Workflow;
 };
@@ -202,7 +218,7 @@ public:
 	void dismiss()
 	{
 		assert(!series_of(this));
-		this->dismiss_recursive();
+		delete this;
 	}
 
 public:
@@ -213,12 +229,25 @@ public:
 	void set_context(void *context) { this->context = context; }
 
 public:
+	SeriesWork *series_at(size_t index)
+	{
+		if (index < this->subtasks_nr)
+			return this->all_series[index];
+		else
+			return NULL;
+	}
+
 	const SeriesWork *series_at(size_t index) const
 	{
 		if (index < this->subtasks_nr)
 			return this->all_series[index];
 		else
 			return NULL;
+	}
+
+	SeriesWork& operator[] (size_t index)
+	{
+		return *this->series_at(index);
 	}
 
 	const SeriesWork& operator[] (size_t index) const
@@ -243,7 +272,6 @@ protected:
 
 private:
 	void expand_buf();
-	void dismiss_recursive();
 
 private:
 	size_t buf_size;
@@ -253,8 +281,7 @@ protected:
 	ParallelWork(parallel_callback_t&& callback);
 	ParallelWork(SeriesWork *const all_series[], size_t n,
 				 parallel_callback_t&& callback);
-	virtual ~ParallelWork() { delete []this->subtasks; }
-	friend class SeriesWork;
+	virtual ~ParallelWork();
 	friend class Workflow;
 };
 

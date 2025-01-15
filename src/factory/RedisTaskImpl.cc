@@ -16,13 +16,17 @@
   Authors: Wu Jiaxu (wujiaxu@sogou-inc.com)
            Li Yingxin (liyingxin@sogou-inc.com)
            Liu Kai (liukaidx@sogou-inc.com)
+           Xie Han (xiehan@sogou-inc.com)
 */
 
 #include <stdio.h>
+#include <string.h>
 #include <string>
+#include "PackageWrapper.h"
 #include "WFTaskError.h"
 #include "WFTaskFactory.h"
 #include "StringUtil.h"
+#include "RedisTaskImpl.inl"
 
 using namespace protocol;
 
@@ -46,12 +50,14 @@ protected:
 	virtual CommMessageOut *message_out();
 	virtual CommMessageIn *message_in();
 	virtual int keep_alive_timeout();
+	virtual int first_timeout();
 	virtual bool init_success();
 	virtual bool finish_once();
 
-private:
+protected:
 	bool need_redirect();
 
+	std::string username_;
 	std::string password_;
 	int db_num_;
 	bool succ_;
@@ -66,6 +72,7 @@ bool ComplexRedisTask::check_request()
 	if (this->req.get_command(command) &&
 		(strcasecmp(command.c_str(), "AUTH") == 0 ||
 		 strcasecmp(command.c_str(), "SELECT") == 0 ||
+		 strcasecmp(command.c_str(), "RESET") == 0 ||
 		 strcasecmp(command.c_str(), "ASKING") == 0))
 	{
 		this->state = WFT_STATE_TASK_ERROR;
@@ -82,25 +89,31 @@ CommMessageOut *ComplexRedisTask::message_out()
 
 	if (seqid <= 1)
 	{
-		if (seqid == 0 && !password_.empty())
+		if (seqid == 0 && (!password_.empty() || !username_.empty()))
 		{
-			succ_ = false;
-			is_user_request_ = false;
 			auto *auth_req = new RedisRequest;
 
-			auth_req->set_request("AUTH", {password_});
+			if (!username_.empty())
+				auth_req->set_request("AUTH", {username_, password_});
+			else
+				auth_req->set_request("AUTH", {password_});
+
+			succ_ = false;
+			is_user_request_ = false;
 			return auth_req;
 		}
 
-		if (db_num_ > 0 && (seqid == 0 || !password_.empty()))
+		if (db_num_ > 0 &&
+			(seqid == 0 || !password_.empty() || !username_.empty()))
 		{
-			succ_ = false;
-			is_user_request_ = false;
 			auto *select_req = new RedisRequest;
 			char buf[32];
 
 			sprintf(buf, "%d", db_num_);
 			select_req->set_request("SELECT", {buf});
+
+			succ_ = false;
+			is_user_request_ = false;
 			return select_req;
 		}
 	}
@@ -134,9 +147,14 @@ int ComplexRedisTask::keep_alive_timeout()
 	return succ_ ? REDIS_KEEPALIVE_DEFAULT : 0;
 }
 
+int ComplexRedisTask::first_timeout()
+{
+	return is_user_request_ ? this->watch_timeo : 0;
+}
+
 bool ComplexRedisTask::init_success()
 {
-	TransportType type;
+	enum TransportType type;
 
 	if (uri_.scheme && strcasecmp(uri_.scheme, "redis") == 0)
 		type = TT_TCP;
@@ -153,20 +171,31 @@ bool ComplexRedisTask::init_success()
 	//https://stackoverflow.com/questions/26964595/whats-the-correct-way-to-use-a-unix-domain-socket-in-requests-framework
 	//https://stackoverflow.com/questions/27037990/connecting-to-postgres-via-database-url-and-unix-socket-in-rails
 
-	//todo userinfo=username:password
-	if (uri_.userinfo && uri_.userinfo[0] == ':' && uri_.userinfo[1])
+	if (uri_.userinfo)
 	{
-		password_.assign(uri_.userinfo + 1);
-		StringUtil::url_decode(password_);
+		char *p = strchr(uri_.userinfo, ':');
+		if (p)
+		{
+			username_.assign(uri_.userinfo, p);
+			password_.assign(p + 1);
+			StringUtil::url_decode(username_);
+			StringUtil::url_decode(password_);
+		}
+		else
+		{
+			username_.assign(uri_.userinfo);
+			StringUtil::url_decode(username_);
+		}
 	}
 
 	if (uri_.path && uri_.path[0] == '/' && uri_.path[1])
 		db_num_ = atoi(uri_.path + 1);
 
-	size_t info_len = password_.size() + 32 + 16;
+	size_t info_len = username_.size() + password_.size() + 32 + 32;
 	char *info = new char[info_len];
 
-	sprintf(info, "redis|pass:%s|db:%d", password_.c_str(), db_num_);
+	sprintf(info, "redis|user:%s|pass:%s|db:%d", username_.c_str(),
+			password_.c_str(), db_num_);
 	this->WFComplexClientTask::set_transport_type(type);
 	this->WFComplexClientTask::set_info(info);
 
@@ -184,6 +213,13 @@ bool ComplexRedisTask::need_redirect()
 	{
 		if (reply->str == NULL)
 			return false;
+
+		if (strncasecmp(reply->str, "NOAUTH ", 7) == 0)
+		{
+			this->state = WFT_STATE_TASK_ERROR;
+			this->error = WFT_ERR_REDIS_ACCESS_DENIED;
+			return false;
+		}
 
 		bool asking = false;
 		if (strncasecmp(reply->str, "ASK ", 4) == 0)
@@ -219,7 +255,6 @@ bool ComplexRedisTask::need_redirect()
 
 			return true;
 		}
-		return false;
 	}
 
 	return false;
@@ -243,6 +278,7 @@ bool ComplexRedisTask::finish_once()
 				this->error = WFT_ERR_REDIS_ACCESS_DENIED;
 			}
 		}
+
 		return false;
 	}
 
@@ -255,6 +291,104 @@ bool ComplexRedisTask::finish_once()
 	}
 
 	return true;
+}
+
+/****** Redis Subscribe ******/
+
+class ComplexRedisSubscribeTask : public ComplexRedisTask
+{
+public:
+	virtual int push(const void *buf, size_t size)
+	{
+		if (finished_)
+		{
+			errno = ENOENT;
+			return -1;
+		}
+
+		if (!watching_)
+		{
+			errno = EAGAIN;
+			return -1;
+		}
+
+		return this->scheduler->push(buf, size, this);
+	}
+
+protected:
+	virtual CommMessageIn *message_in()
+	{
+		if (!is_user_request_)
+			return this->ComplexRedisTask::message_in();
+
+		return &wrapper_;
+	}
+
+	virtual int first_timeout()
+	{
+		return watching_ ? this->watch_timeo : 0;
+	}
+
+protected:
+	class SubscribeWrapper : public PackageWrapper
+	{
+	protected:
+		virtual ProtocolMessage *next_in(ProtocolMessage *message);
+
+	protected:
+		ComplexRedisSubscribeTask *task_;
+
+	public:
+		SubscribeWrapper(ComplexRedisSubscribeTask *task) :
+			PackageWrapper(task->get_resp())
+		{
+			task_ = task;
+		}
+	};
+
+protected:
+	SubscribeWrapper wrapper_;
+	bool watching_;
+	bool finished_;
+	std::function<void (WFRedisTask *)> extract_;
+
+public:
+	ComplexRedisSubscribeTask(std::function<void (WFRedisTask *)>&& extract,
+							  redis_callback_t&& callback) :
+		ComplexRedisTask(0, std::move(callback)),
+		wrapper_(this),
+		extract_(std::move(extract))
+	{
+		watching_ = false;
+		finished_ = false;
+	}
+};
+
+ProtocolMessage *
+ComplexRedisSubscribeTask::SubscribeWrapper::next_in(ProtocolMessage *message)
+{
+	redis_reply_t *reply = task_->resp.result_ptr();
+
+	if (reply->type != REDIS_REPLY_TYPE_ARRAY)
+	{
+		task_->finished_ = true;
+		return NULL;
+	}
+
+	if (reply->elements == 3 &&
+		reply->element[2]->type == REDIS_REPLY_TYPE_INTEGER &&
+		reply->element[2]->integer == 0)
+	{
+		task_->finished_ = true;
+	}
+
+	task_->watching_ = true;
+	task_->extract_(task_);
+
+	RedisResponse resp;
+	*(protocol::ProtocolMessage *)&resp = std::move(task_->resp);
+	task_->resp = std::move(resp);
+	return task_->finished_ ? NULL : &task_->resp;
 }
 
 /**********Factory**********/
@@ -283,6 +417,32 @@ WFRedisTask *WFTaskFactory::create_redis_task(const ParsedURI& uri,
 
 	task->init(uri);
 	task->set_keep_alive(REDIS_KEEPALIVE_DEFAULT);
+	return task;
+}
+
+WFRedisTask *
+__WFRedisTaskFactory::create_subscribe_task(const std::string& url,
+											extract_t extract,
+											redis_callback_t callback)
+{
+	auto *task = new ComplexRedisSubscribeTask(std::move(extract),
+											   std::move(callback));
+	ParsedURI uri;
+
+	URIParser::parse(url, uri);
+	task->init(std::move(uri));
+	return task;
+}
+
+WFRedisTask *
+__WFRedisTaskFactory::create_subscribe_task(const ParsedURI& uri,
+											extract_t extract,
+											redis_callback_t callback)
+{
+	auto *task = new ComplexRedisSubscribeTask(std::move(extract),
+											   std::move(callback));
+
+	task->init(uri);
 	return task;
 }
 

@@ -30,16 +30,19 @@
 #include <mutex>
 #include <condition_variable>
 #include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/engine.h>
-#include <openssl/conf.h>
-#include <openssl/crypto.h>
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+# include <openssl/err.h>
+# include <openssl/engine.h>
+# include <openssl/conf.h>
+# include <openssl/crypto.h>
+#endif
 #include "CommScheduler.h"
 #include "Executor.h"
 #include "WFResourcePool.h"
 #include "WFTaskError.h"
 #include "WFDnsClient.h"
 #include "WFGlobal.h"
+#include "URIParser.h"
 
 class __WFGlobal
 {
@@ -81,19 +84,31 @@ public:
 
 		sync_mutex_.lock();
 		inc = ++sync_count_ > sync_max_;
-
 		if (inc)
 			sync_max_ = sync_count_;
+
 		sync_mutex_.unlock();
 		if (inc)
-			WFGlobal::get_scheduler()->increase_handler_thread();
+			WFGlobal::increase_handler_thread();
 	}
 
 	void sync_operation_end()
 	{
+		int dec = 0;
+
 		sync_mutex_.lock();
-		sync_count_--;
+		if (--sync_count_ < (sync_max_ + 1) / 2)
+		{
+			dec = sync_max_ - 2 * sync_count_;
+			sync_max_ -= dec;
+		}
+
 		sync_mutex_.unlock();
+		while (dec > 0)
+		{
+			WFGlobal::decrease_handler_thread();
+			dec--;
+		}
 	}
 
 private:
@@ -153,6 +168,11 @@ __WFGlobal::__WFGlobal()
 	static_scheme_port_["kafka"] = "9092";
 	static_scheme_port_["Kafka"] = "9092";
 	static_scheme_port_["KAFKA"] = "9092";
+
+	static_scheme_port_["kafkas"] = "9093";
+	static_scheme_port_["Kafkas"] = "9093";
+	static_scheme_port_["KAFKAs"] = "9093";
+	static_scheme_port_["KAFKAS"] = "9093";
 
 	sync_count_ = 0;
 	sync_max_ = 0;
@@ -325,33 +345,13 @@ public:
 	static __CommManager *get_instance()
 	{
 		static __CommManager kInstance;
+		__CommManager::created_ = true;
 		return &kInstance;
 	}
 
 	CommScheduler *get_scheduler() { return &scheduler_; }
-	IOService *get_io_service()
-	{
-		if (!fio_flag_)
-		{
-			fio_mutex_.lock();
-			if (!fio_flag_)
-			{
-				fio_service_ = new __FileIOService(&scheduler_);
-				//todo EAGAIN 65536->2
-				if (fio_service_->init(8192) < 0)
-					abort();
-
-				if (fio_service_->bind() < 0)
-					abort();
-
-				fio_flag_ = true;
-			}
-
-			fio_mutex_.unlock();
-		}
-
-		return fio_service_;
-	}
+	IOService *get_io_service();
+	static bool is_created() { return created_; }
 
 private:
 	__CommManager():
@@ -382,7 +382,46 @@ private:
 	__FileIOService *fio_service_;
 	volatile bool fio_flag_;
 	std::mutex fio_mutex_;
+
+private:
+	static bool created_;
 };
+
+bool __CommManager::created_ = false;
+
+inline IOService *__CommManager::get_io_service()
+{
+	if (!fio_flag_)
+	{
+		fio_mutex_.lock();
+		if (!fio_flag_)
+		{
+			int maxevents = WFGlobal::get_global_settings()->fio_max_events;
+			int n = 65536;
+
+			fio_service_ = new __FileIOService(&scheduler_);
+			while (fio_service_->init(maxevents) < 0)
+			{
+				if ((errno != EAGAIN && errno != EINVAL) || maxevents <= 16)
+					abort();
+
+				while (n >= maxevents)
+					n /= 2;
+
+				maxevents = n;
+			}
+
+			if (fio_service_->bind() < 0)
+				abort();
+
+			fio_flag_ = true;
+		}
+
+		fio_mutex_.unlock();
+	}
+
+	return fio_service_;
+}
 
 class __ExecManager
 {
@@ -396,40 +435,7 @@ public:
 		return &kInstance;
 	}
 
-	ExecQueue *get_exec_queue(const std::string& queue_name)
-	{
-		ExecQueue *queue = NULL;
-		ExecQueueMap::const_iterator iter;
-
-		pthread_rwlock_rdlock(&rwlock_);
-		iter = queue_map_.find(queue_name);
-		if (iter != queue_map_.cend())
-			queue = iter->second;
-
-		pthread_rwlock_unlock(&rwlock_);
-		if (queue)
-			return queue;
-
-		pthread_rwlock_wrlock(&rwlock_);
-		iter = queue_map_.find(queue_name);
-		if (iter == queue_map_.cend())
-		{
-			queue = new ExecQueue();
-			if (queue->init() >= 0)
-				queue_map_.emplace(queue_name, queue);
-			else
-			{
-				delete queue;
-				queue = NULL;
-			}
-		}
-		else
-			queue = iter->second;
-
-		pthread_rwlock_unlock(&rwlock_);
-		return queue;
-	}
-
+	ExecQueue *get_exec_queue(const std::string& queue_name);
 	Executor *get_compute_executor() { return &compute_executor_; }
 
 private:
@@ -438,7 +444,7 @@ private:
 	{
 		int compute_threads = WFGlobal::get_global_settings()->compute_threads;
 
-		if (compute_threads <= 0)
+		if (compute_threads < 0)
 			compute_threads = sysconf(_SC_NPROCESSORS_ONLN);
 
 		if (compute_executor_.init(compute_threads) < 0)
@@ -462,10 +468,72 @@ private:
 	Executor compute_executor_;
 };
 
-#define MAX(x, y)	((x) >= (y) ? (x) : (y))
-#define HOSTS_LINEBUF_INIT_SIZE	128
+inline ExecQueue *__ExecManager::get_exec_queue(const std::string& queue_name)
+{
+	ExecQueue *queue = NULL;
+	ExecQueueMap::const_iterator iter;
+
+	pthread_rwlock_rdlock(&rwlock_);
+	iter = queue_map_.find(queue_name);
+	if (iter != queue_map_.cend())
+		queue = iter->second;
+
+	pthread_rwlock_unlock(&rwlock_);
+	if (queue)
+		return queue;
+
+	pthread_rwlock_wrlock(&rwlock_);
+	iter = queue_map_.find(queue_name);
+	if (iter == queue_map_.cend())
+	{
+		queue = new ExecQueue();
+		if (queue->init() >= 0)
+			queue_map_.emplace(queue_name, queue);
+		else
+		{
+			delete queue;
+			queue = NULL;
+		}
+	}
+	else
+		queue = iter->second;
+
+	pthread_rwlock_unlock(&rwlock_);
+	return queue;
+}
+
+static std::string __dns_server_url(const std::string& url,
+									const struct addrinfo *hints)
+{
+	std::string host;
+	ParsedURI uri;
+	struct addrinfo *res;
+	struct in6_addr buf;
+
+	if (strncasecmp(url.c_str(), "dns://", 6) == 0 ||
+		strncasecmp(url.c_str(), "dnss://", 7) == 0)
+	{
+		host = url;
+	}
+	else if (inet_pton(AF_INET6, url.c_str(), &buf) > 0)
+		host = "dns://[" + url + "]";
+	else
+		host = "dns://" + url;
+
+	if (URIParser::parse(host, uri) == 0 && uri.host && uri.host[0])
+	{
+		if (getaddrinfo(uri.host, "53", hints, &res) == 0)
+		{
+			freeaddrinfo(res);
+			return host;
+		}
+	}
+
+	return "";
+}
 
 static void __split_merge_str(const char *p, bool is_nameserver,
+							  const struct addrinfo *hints,
 							  std::string& result)
 {
 	const char *start;
@@ -485,18 +553,17 @@ static void __split_merge_str(const char *p, bool is_nameserver,
 		if (start == p)
 			break;
 
-		if (!result.empty())
-			result.push_back(',');
-
 		std::string str(start, p);
 		if (is_nameserver)
-		{
-			struct in6_addr buf;
-			if (inet_pton(AF_INET6, str.c_str(), &buf) > 0)
-				str = "[" + str + "]";
-		}
+			str = __dns_server_url(str, hints);
 
-		result.append(str);
+		if (!str.empty())
+		{
+			if (!result.empty())
+				result.push_back(',');
+
+			result.append(str);
+		}
 	}
 }
 
@@ -552,12 +619,19 @@ static int __parse_resolv_conf(const char *path,
 	if (!fp)
 		return -1;
 
+	const struct WFGlobalSettings *settings = WFGlobal::get_global_settings();
+	struct addrinfo hints = {
+		.ai_flags		=	AI_ADDRCONFIG | AI_NUMERICHOST | AI_NUMERICSERV,
+		.ai_family		=	settings->dns_server_params.address_family,
+		.ai_socktype	=	SOCK_STREAM,
+	};
+
 	while ((ret = getline(&line, &bufsize, fp)) > 0)
 	{
 		if (strncmp(line, "nameserver", 10) == 0)
-			__split_merge_str(line + 10, true, url);
+			__split_merge_str(line + 10, true, &hints, url);
 		else if (strncmp(line, "search", 6) == 0)
-			__split_merge_str(line + 6, false, search_list);
+			__split_merge_str(line + 6, false, &hints, search_list);
 		else if (strncmp(line, "options", 7) == 0)
 			__set_options(line + 7, ndots, attempts, rotate);
 	}
@@ -628,6 +702,11 @@ DnsCache WFGlobal::dns_cache_;
 WFDnsResolver WFGlobal::dns_resolver_;
 WFNameService WFGlobal::name_service_(&WFGlobal::dns_resolver_);
 
+bool WFGlobal::is_scheduler_created()
+{
+	return __CommManager::is_created();
+}
+
 CommScheduler *WFGlobal::get_scheduler()
 {
 	return __CommManager::get_instance()->get_scheduler();
@@ -689,14 +768,22 @@ void WFGlobal::register_scheme_port(const std::string& scheme,
 	__WFGlobal::get_instance()->register_scheme_port(scheme, port);
 }
 
-void WFGlobal::sync_operation_begin()
+int WFGlobal::sync_operation_begin()
 {
-	__WFGlobal::get_instance()->sync_operation_begin();
+	if (WFGlobal::is_scheduler_created() &&
+		WFGlobal::get_scheduler()->is_handler_thread())
+	{
+		__WFGlobal::get_instance()->sync_operation_begin();
+		return 1;
+	}
+
+	return 0;
 }
 
-void WFGlobal::sync_operation_end()
+void WFGlobal::sync_operation_end(int cookie)
 {
-	__WFGlobal::get_instance()->sync_operation_end();
+	if (cookie)
+		__WFGlobal::get_instance()->sync_operation_end();
 }
 
 static inline const char *__get_ssl_error_string(int error)
@@ -825,6 +912,18 @@ static inline const char *__get_task_error_string(int error)
 	case WFT_ERR_KAFKA_VERSION_DISALLOWED:
 		return "Kafka broker version not supported";
 
+    case WFT_ERR_KAFKA_SASL_DISALLOWED:
+        return "Kafka sasl disallowed";
+	
+    case WFT_ERR_KAFKA_ARRANGE_FAILED:
+        return "Kafka arrange failed";
+	
+    case WFT_ERR_KAFKA_LIST_OFFSETS_FAILED:
+        return "Kafka list offsets failed";
+
+    case WFT_ERR_KAFKA_CGROUP_ASSIGN_FAILED:
+        return "Kafka cgroup assign failed";
+			
 	case WFT_ERR_CONSUL_API_UNKNOWN:
 		return "Consul api type unknown";
 
@@ -862,6 +961,9 @@ const char *WFGlobal::get_error_string(int state, int error)
 
 	case WFT_STATE_TASK_ERROR:
 		return __get_task_error_string(error);
+
+	case WFT_STATE_ABORTED:
+		return "Aborted";
 
 	case WFT_STATE_UNDEFINED:
 		return "Undefined";

@@ -18,6 +18,9 @@ set(memcheck_command ${CMAKE_MEMORYCHECK_COMMAND} ${CMAKE_MEMORYCHECK_COMMAND_OP
 add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
 
 enable_testing()
+
+set(CXX_STD "c++14")
+
 find_package(GTest REQUIRED)
 
 if (WIN32)
@@ -25,7 +28,10 @@ if (WIN32)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /wd4200 /std:c++14")
 else ()
 		set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -Wall -fPIC -pipe -std=gnu90")
-		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -pipe -std=c++11 -fno-exceptions")
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -pipe -std=${CXX_STD} -fno-exceptions")
+		if (APPLE)
+			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+		endif()
 endif ()
 
 set(TEST_LIST
@@ -56,7 +62,8 @@ foreach(src ${TEST_LIST})
 	add_dependencies(check ${src})
 endforeach()
 
-foreach(src ${TEST_LIST})
-	add_test(${src}-memory-check ${memcheck_command} ./${src})
-endforeach()
-
+if (NOT ${CMAKE_MEMORYCHECK_COMMAND} STREQUAL "CMAKE_MEMORYCHECK_COMMAND-NOTFOUND")
+	foreach(src ${TEST_LIST})
+		add_test(${src}-memory-check ${memcheck_command} ./${src})
+	endforeach()
+endif ()

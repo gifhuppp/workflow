@@ -86,6 +86,10 @@ private:
 	}
 
 private:
+	int maxevents;
+	int nevents;
+
+private:
 	void incref();
 	void decref();
 
@@ -100,6 +104,14 @@ private:
 private:
 	static void *io_routine(void *arg);
 	static void *aio_finish(void *ptr, void *context);
+
+private:
+	static ssize_t preadv_emul(int fd, const struct iovec *iov, int iovcnt,
+							   off_t offset);
+	static ssize_t pwritev_emul(int fd, const struct iovec *iov, int iovcnt,
+								off_t offset);
+	ssize_t (*preadv)(int, const struct iovec *, int, off_t);
+	ssize_t (*pwritev)(int, const struct iovec *, int, off_t);
 
 public:
 	virtual ~IOService() { }

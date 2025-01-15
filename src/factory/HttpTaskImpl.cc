@@ -23,8 +23,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <string>
-#include <openssl/bio.h>
 #include <openssl/ssl.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
 #include "WFTaskError.h"
 #include "WFTaskFactory.h"
 #include "StringUtil.h"
@@ -38,6 +39,23 @@ using namespace protocol;
 #define HTTP_KEEPALIVE_MAX		(300 * 1000)
 
 /**********Client**********/
+
+static int __encode_auth(const char *p, std::string& auth)
+{
+	size_t len = strlen(p);
+	size_t base64_len = (len + 2) / 3 * 4;
+	char *base64 = (char *)malloc(base64_len + 1);
+
+	if (!base64)
+		return -1;
+
+	EVP_EncodeBlock((unsigned char *)base64, (const unsigned char *)p, len);
+	auth.append("Basic ");
+	auth.append(base64, base64_len);
+
+	free(base64);
+	return 0;
+}
 
 class ComplexHttpTask : public WFComplexClientTask<HttpRequest, HttpResponse>
 {
@@ -64,8 +82,9 @@ protected:
 	virtual bool finish_once();
 
 protected:
-	bool need_redirect(ParsedURI& uri);
-	bool redirect_url(HttpResponse *client_resp, ParsedURI& uri);
+	bool need_redirect(const ParsedURI& uri, ParsedURI& new_uri);
+	bool redirect_url(HttpResponse *client_resp,
+					  const ParsedURI& uri, ParsedURI& new_uri);
 	void set_empty_request();
 	void check_response();
 
@@ -114,7 +133,7 @@ CommMessageOut *ComplexHttpTask::message_out()
 			header.value = "close";
 			header.value_len = strlen("close");
 		}
-	
+
 		req->add_header(&header);
 	}
 
@@ -122,13 +141,15 @@ CommMessageOut *ComplexHttpTask::message_out()
 		this->keep_alive_timeo = 0;
 	else if (req->has_keep_alive_header())
 	{
-		HttpHeaderCursor req_cursor(req);
+		HttpHeaderCursor cursor(req);
 
 		//req---Connection: Keep-Alive
 		//req---Keep-Alive: timeout=0,max=100
 		header.name = "Keep-Alive";
 		header.name_len = strlen("Keep-Alive");
-		if (req_cursor.find(&header))
+		header.value = NULL;
+		header.value_len = 0;
+		if (cursor.find(&header))
 		{
 			std::string keep_alive((const char *)header.value, header.value_len);
 			std::vector<std::string> params = StringUtil::split(keep_alive, ',');
@@ -151,10 +172,8 @@ CommMessageOut *ComplexHttpTask::message_out()
 
 		if ((unsigned int)this->keep_alive_timeo > HTTP_KEEPALIVE_MAX)
 			this->keep_alive_timeo = HTTP_KEEPALIVE_MAX;
-		//if (this->keep_alive_timeo < 0 || this->keep_alive_timeo > HTTP_KEEPALIVE_MAX)
 	}
 
-	//req->set_header_pair("Accept", "*/*");
 	return this->WFComplexClientTask::message_out();
 }
 
@@ -176,8 +195,18 @@ int ComplexHttpTask::keep_alive_timeout()
 void ComplexHttpTask::set_empty_request()
 {
 	HttpRequest *client_req = this->get_req();
+	HttpHeaderCursor cursor(client_req);
+	struct HttpMessageHeader header = {
+		.name		=	"Host",
+		.name_len	=	strlen("Host"),
+	};
+
 	client_req->set_request_uri("/");
-	client_req->set_header_pair("Host", "");
+	cursor.find_and_erase(&header);
+
+	header.name = "Authorization";
+	header.name_len = strlen("Authorization");
+	cursor.find_and_erase(&header);
 }
 
 void ComplexHttpTask::init_failed()
@@ -191,7 +220,6 @@ bool ComplexHttpTask::init_success()
 	std::string request_uri;
 	std::string header_host;
 	bool is_ssl;
-	bool is_unix = false;
 
 	if (uri_.scheme && strcasecmp(uri_.scheme, "http") == 0)
 		is_ssl = false;
@@ -201,7 +229,6 @@ bool ComplexHttpTask::init_success()
 	{
 		this->state = WFT_STATE_TASK_ERROR;
 		this->error = WFT_ERR_URI_SCHEME_INVALID;
-		this->set_empty_request();
 		return false;
 	}
 
@@ -221,13 +248,9 @@ bool ComplexHttpTask::init_success()
 	}
 
 	if (uri_.host && uri_.host[0])
-	{
 		header_host = uri_.host;
-		if (uri_.host[0] == '/')
-			is_unix = true;
-	}
 
-	if (!is_unix && uri_.port && uri_.port[0])
+	if (uri_.port && uri_.port[0])
 	{
 		int port = atoi(uri_.port);
 
@@ -253,10 +276,28 @@ bool ComplexHttpTask::init_success()
 	client_req->set_request_uri(request_uri.c_str());
 	client_req->set_header_pair("Host", header_host.c_str());
 
+	if (uri_.userinfo && uri_.userinfo[0])
+	{
+		std::string userinfo(uri_.userinfo);
+		std::string http_auth;
+
+		StringUtil::url_decode(userinfo);
+
+		if (__encode_auth(userinfo.c_str(), http_auth) < 0)
+		{
+			this->state = WFT_STATE_SYS_ERROR;
+			this->error = errno;
+			return false;
+		}
+
+		client_req->set_header_pair("Authorization", http_auth.c_str());
+	}
+
 	return true;
 }
 
-bool ComplexHttpTask::redirect_url(HttpResponse *client_resp, ParsedURI& uri)
+bool ComplexHttpTask::redirect_url(HttpResponse *client_resp,
+								   const ParsedURI& uri, ParsedURI& new_uri)
 {
 	if (redirect_count_ < redirect_max_)
 	{
@@ -284,14 +325,14 @@ bool ComplexHttpTask::redirect_url(HttpResponse *client_resp, ParsedURI& uri)
 			url = uri.scheme + (':' + url);
 		}
 
-		URIParser::parse(url, uri);
+		URIParser::parse(url, new_uri);
 		return true;
 	}
 
 	return false;
 }
 
-bool ComplexHttpTask::need_redirect(ParsedURI& uri)
+bool ComplexHttpTask::need_redirect(const ParsedURI& uri, ParsedURI& new_uri)
 {
 	HttpRequest *client_req = this->get_req();
 	HttpResponse *client_resp = this->get_resp();
@@ -308,7 +349,7 @@ bool ComplexHttpTask::need_redirect(ParsedURI& uri)
 	case 301:
 	case 302:
 	case 303:
-		if (redirect_url(client_resp, uri))
+		if (redirect_url(client_resp, uri, new_uri))
 		{
 			if (strcasecmp(method, HttpMethodGet) != 0 &&
 				strcasecmp(method, HttpMethodHead) != 0)
@@ -323,7 +364,7 @@ bool ComplexHttpTask::need_redirect(ParsedURI& uri)
 
 	case 307:
 	case 308:
-		if (redirect_url(client_resp, uri))
+		if (redirect_url(client_resp, uri, new_uri))
 			return true;
 		else
 			break;
@@ -343,9 +384,7 @@ void ComplexHttpTask::check_response()
 	if (this->state == WFT_STATE_SYS_ERROR && this->error == ECONNRESET)
 	{
 		/* Servers can end the message by closing the connection. */
-		if (resp->is_header_complete() &&
-			!resp->is_keep_alive() &&
-			!resp->is_chunked() &&
+		if (resp->is_header_complete() && !resp->is_chunked() &&
 			!resp->has_content_length_header())
 		{
 			this->state = WFT_STATE_SUCCESS;
@@ -361,8 +400,31 @@ bool ComplexHttpTask::finish_once()
 
 	if (this->state == WFT_STATE_SUCCESS)
 	{
-		if (this->need_redirect(uri_))
-			this->set_redirect(uri_);
+		ParsedURI new_uri;
+		if (this->need_redirect(uri_, new_uri))
+		{
+			if (uri_.userinfo && strcasecmp(uri_.host, new_uri.host) == 0)
+			{
+				if (!new_uri.userinfo)
+				{
+					new_uri.userinfo = uri_.userinfo;
+					uri_.userinfo = NULL;
+				}
+			}
+			else if (uri_.userinfo)
+			{
+				HttpRequest *client_req = this->get_req();
+				HttpHeaderCursor cursor(client_req);
+				struct HttpMessageHeader header = {
+					.name = "Authorization",
+					.name_len = strlen("Authorization")
+				};
+
+				cursor.find_and_erase(&header);
+			}
+
+			this->set_redirect(new_uri);
+		}
 		else if (this->state != WFT_STATE_SUCCESS)
 			this->disable_retry();
 	}
@@ -371,42 +433,6 @@ bool ComplexHttpTask::finish_once()
 }
 
 /*******Proxy Client*******/
-
-static int __encode_auth(const char *p, std::string& auth)
-{
-	static SSL_CTX *init_ssl = WFGlobal::get_ssl_client_ctx();
-	(void)init_ssl;
-	BUF_MEM *bptr;
-	BIO *bmem;
-	BIO *b64;
-
-	b64 = BIO_new(BIO_f_base64());
-	if (b64)
-	{
-		bmem = BIO_new(BIO_s_mem());
-		if (bmem)
-		{
-			BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-			b64 = BIO_push(b64, bmem);
-			BIO_write(b64, p, strlen(p));
-			(void)BIO_flush(b64);
-			BIO_get_mem_ptr(b64, &bptr);
-
-			if (bptr->length > 0)
-			{
-				auth.append("Basic ");
-				auth.append(bptr->data, bptr->length);
-			}
-
-			BIO_free_all(b64);
-			return 0;
-		}
-
-		BIO_free_all(b64);
-	}
-
-	return -1;
-}
 
 static SSL *__create_ssl(SSL_CTX *ssl_ctx)
 {
@@ -455,6 +481,7 @@ protected:
 	virtual CommMessageOut *message_out();
 	virtual CommMessageIn *message_in();
 	virtual int keep_alive_timeout();
+	virtual int first_timeout();
 	virtual bool init_success();
 	virtual bool finish_once();
 
@@ -472,25 +499,25 @@ protected:
 private:
 	struct SSLConnection : public WFConnection
 	{
-		SSL *ssl_;
-		SSLHandshaker handshaker_;
-		SSLWrapper wrapper_;
-		SSLConnection(SSL *ssl) : handshaker_(ssl), wrapper_(&wrapper_, ssl)
+		SSL *ssl;
+		SSLHandshaker handshaker;
+		SSLWrapper wrapper;
+		SSLConnection(SSL *ssl) : handshaker(ssl), wrapper(&wrapper, ssl)
 		{
-			ssl_ = ssl;
+			this->ssl = ssl;
 		}
 	};
 
 	SSLHandshaker *get_ssl_handshaker() const
 	{
-		return &((SSLConnection *)this->get_connection())->handshaker_;
+		return &((SSLConnection *)this->get_connection())->handshaker;
 	}
 
 	SSLWrapper *get_ssl_wrapper(ProtocolMessage *msg) const
 	{
 		SSLConnection *conn = (SSLConnection *)this->get_connection();
-		conn->wrapper_ = SSLWrapper(msg, conn->ssl_);
-		return &conn->wrapper_;
+		conn->wrapper = SSLWrapper(msg, conn->ssl);
+		return &conn->wrapper;
 	}
 
 	int init_ssl_connection();
@@ -505,7 +532,8 @@ private:
 
 int ComplexHttpProxyTask::init_ssl_connection()
 {
-	SSL *ssl = __create_ssl(WFGlobal::get_ssl_client_ctx());
+	static SSL_CTX *ssl_ctx = WFGlobal::get_ssl_client_ctx();
+	SSL *ssl = __create_ssl(ssl_ctx_ ? ssl_ctx_ : ssl_ctx);
 	WFConnection *conn;
 
 	if (!ssl)
@@ -520,7 +548,7 @@ int ComplexHttpProxyTask::init_ssl_connection()
 	auto&& deleter = [] (void *ctx)
 	{
 		SSLConnection *ssl_conn = (SSLConnection *)ctx;
-		SSL_free(ssl_conn->ssl_);
+		SSL_free(ssl_conn->ssl);
 		delete ssl_conn;
 	};
 	conn->set_context(ssl_conn, std::move(deleter));
@@ -577,10 +605,7 @@ CommMessageIn *ComplexHttpProxyTask::message_in()
 		return get_ssl_handshaker();
 
 	auto *msg = (ProtocolMessage *)this->ComplexHttpTask::message_in();
-	if (is_ssl_)
-		return get_ssl_wrapper(msg);
-
-	return msg;
+	return is_ssl_ ? get_ssl_wrapper(msg) : msg;
 }
 
 int ComplexHttpProxyTask::keep_alive_timeout()
@@ -628,6 +653,11 @@ int ComplexHttpProxyTask::keep_alive_timeout()
 	return this->ComplexHttpTask::keep_alive_timeout();
 }
 
+int ComplexHttpProxyTask::first_timeout()
+{
+	return is_user_request_ ? this->watch_timeo : 0;
+}
+
 bool ComplexHttpProxyTask::init_success()
 {
 	if (!uri_.scheme || strcasecmp(uri_.scheme, "http") != 0)
@@ -658,7 +688,6 @@ bool ComplexHttpProxyTask::init_success()
 	{
 		this->state = WFT_STATE_TASK_ERROR;
 		this->error = WFT_ERR_URI_SCHEME_INVALID;
-		this->set_empty_request();
 		return false;
 	}
 
@@ -676,17 +705,6 @@ bool ComplexHttpProxyTask::init_success()
 	else
 		user_port = is_ssl_ ? 443 : 80;
 
-	if (uri_.userinfo && uri_.userinfo[0])
-	{
-		proxy_auth_.clear();
-		if (__encode_auth(uri_.userinfo, proxy_auth_) < 0)
-		{
-			this->state = WFT_STATE_SYS_ERROR;
-			this->error = errno;
-			return false;
-		}
-	}
-
 	std::string info("http-proxy|remote:");
 	info += is_ssl_ ? "https://" : "http://";
 	info += user_uri_.host;
@@ -695,8 +713,24 @@ bool ComplexHttpProxyTask::init_success()
 		info += user_uri_.port;
 	else
 		info += is_ssl_ ? "443" : "80";
-	info += "|auth:";
-	info += proxy_auth_;
+
+	if (uri_.userinfo && uri_.userinfo[0])
+	{
+		std::string userinfo(uri_.userinfo);
+
+		StringUtil::url_decode(userinfo);
+		proxy_auth_.clear();
+
+		if (__encode_auth(userinfo.c_str(), proxy_auth_) < 0)
+		{
+			this->state = WFT_STATE_SYS_ERROR;
+			this->error = errno;
+			return false;
+		}
+
+		info += "|auth:";
+		info += proxy_auth_;
+	}
 
 	this->WFComplexClientTask::set_info(info);
 
@@ -727,6 +761,24 @@ bool ComplexHttpProxyTask::init_success()
 	client_req->set_request_uri(request_uri.c_str());
 	client_req->set_header_pair("Host", header_host.c_str());
 	this->WFComplexClientTask::set_transport_type(TT_TCP);
+
+	if (user_uri_.userinfo && user_uri_.userinfo[0])
+	{
+		std::string userinfo(user_uri_.userinfo);
+		std::string http_auth;
+
+		StringUtil::url_decode(userinfo);
+
+		if (__encode_auth(userinfo.c_str(), http_auth) < 0)
+		{
+			this->state = WFT_STATE_SYS_ERROR;
+			this->error = errno;
+			return false;
+		}
+
+		client_req->set_header_pair("Authorization", http_auth.c_str());
+	}
+
 	return true;
 }
 
@@ -755,8 +807,33 @@ bool ComplexHttpProxyTask::finish_once()
 
 	if (this->state == WFT_STATE_SUCCESS)
 	{
-		if (this->need_redirect(user_uri_))
+		ParsedURI new_uri;
+		if (this->need_redirect(user_uri_, new_uri))
+		{
+			if (user_uri_.userinfo &&
+				strcasecmp(user_uri_.host, new_uri.host) == 0)
+			{
+				if (!new_uri.userinfo)
+				{
+					new_uri.userinfo = user_uri_.userinfo;
+					user_uri_.userinfo = NULL;
+				}
+			}
+			else if (user_uri_.userinfo)
+			{
+				HttpRequest *client_req = this->get_req();
+				HttpHeaderCursor cursor(client_req);
+				struct HttpMessageHeader header = {
+					.name = "Authorization",
+					.name_len = strlen("Authorization")
+				};
+
+				cursor.find_and_erase(&header);
+			}
+
+			user_uri_ = std::move(new_uri);
 			this->set_redirect(uri_);
+		}
 		else if (this->state != WFT_STATE_SUCCESS)
 			this->disable_retry();
 	}
@@ -834,48 +911,53 @@ WFHttpTask *WFTaskFactory::create_http_task(const ParsedURI& uri,
 
 /**********Server**********/
 
-class WFHttpServerTask : public WFServerTask<HttpRequest, HttpResponse>
+class WFHttpServerTask : public WFServerTask<protocol::HttpRequest,
+											 protocol::HttpResponse>
 {
+private:
+	using TASK = WFNetworkTask<protocol::HttpRequest, protocol::HttpResponse>;
+
 public:
-	WFHttpServerTask(CommService *service,
-					 std::function<void (WFHttpTask *)>& process):
-		WFServerTask(service, WFGlobal::get_scheduler(), process),
+	WFHttpServerTask(CommService *service, std::function<void (TASK *)>& proc) :
+		WFServerTask(service, WFGlobal::get_scheduler(), proc),
 		req_is_alive_(false),
 		req_has_keep_alive_header_(false)
 	{}
 
 protected:
-	virtual void handle(int state, int error)
-	{
-		if (state == WFT_STATE_TOREPLY)
-		{
-			req_is_alive_ = this->req.is_keep_alive();
-			if (req_is_alive_ && this->req.has_keep_alive_header())
-			{
-				HttpHeaderCursor req_cursor(&this->req);
-				struct HttpMessageHeader header;
-
-				header.name = "Keep-Alive";
-				header.name_len = strlen("Keep-Alive");
-				req_has_keep_alive_header_ = req_cursor.find(&header);
-				if (req_has_keep_alive_header_)
-				{
-					req_keep_alive_.assign((const char *)header.value,
-											header.value_len);
-				}
-			}
-		}
-
-		this->WFServerTask::handle(state, error);
-	}
-
+	virtual void handle(int state, int error);
 	virtual CommMessageOut *message_out();
 
-private:
+protected:
 	bool req_is_alive_;
 	bool req_has_keep_alive_header_;
 	std::string req_keep_alive_;
 };
+
+void WFHttpServerTask::handle(int state, int error)
+{
+	if (state == WFT_STATE_TOREPLY)
+	{
+		req_is_alive_ = this->req.is_keep_alive();
+		if (req_is_alive_ && this->req.has_keep_alive_header())
+		{
+			HttpHeaderCursor cursor(&this->req);
+			struct HttpMessageHeader header = {
+				.name		=	"Keep-Alive",
+				.name_len	=	strlen("Keep-Alive"),
+			};
+
+			req_has_keep_alive_header_ = cursor.find(&header);
+			if (req_has_keep_alive_header_)
+			{
+				req_keep_alive_.assign((const char *)header.value,
+										header.value_len);
+			}
+		}
+	}
+
+	this->WFServerTask::handle(state, error);
+}
 
 CommMessageOut *WFHttpServerTask::message_out()
 {

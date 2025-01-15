@@ -13,8 +13,8 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 
-  Authors: Wu Jiaxu (wujiaxu@sogou-inc.com)
-           Xie Han (xiehan@sogou-inc.com)
+  Authors: Xie Han (xiehan@sogou-inc.com)
+           Wu Jiaxu (wujiaxu@sogou-inc.com)
 */
 
 #ifndef _WFTASKFACTORY_H_
@@ -25,6 +25,7 @@
 #include <time.h>
 #include <utility>
 #include <functional>
+#include <openssl/ssl.h>
 #include "URIParser.h"
 #include "RedisMessage.h"
 #include "HttpMessage.h"
@@ -34,7 +35,6 @@
 #include "WFTask.h"
 #include "WFGraphTask.h"
 #include "EndpointParams.h"
-#include "WFAlgoTaskFactory.h"
 
 // Network Client/Server tasks
 
@@ -90,8 +90,9 @@ using fsync_callback_t = std::function<void (WFFileSyncTask *)>;
 using timer_callback_t = std::function<void (WFTimerTask *)>;
 using counter_callback_t = std::function<void (WFCounterTask *)>;
 
-// Mailbox is like counter with data passing
 using mailbox_callback_t = std::function<void (WFMailboxTask *)>;
+
+using selector_callback_t = std::function<void (WFSelectorTask *)>;
 
 // Graph (DAG) task.
 using graph_callback_t = std::function<void (WFGraphTask *)>;
@@ -100,6 +101,11 @@ using WFEmptyTask = WFGenericTask;
 
 using WFDynamicTask = WFGenericTask;
 using dynamic_create_t = std::function<SubTask *(WFDynamicTask *)>;
+
+using repeated_create_t = std::function<SubTask *(WFRepeaterTask *)>;
+using repeater_callback_t = std::function<void (WFRepeaterTask *)>;
+
+using module_callback_t = std::function<void (const WFModuleTask *)>;
 
 class WFTaskFactory
 {
@@ -163,9 +169,6 @@ public:
 											off_t offset,
 											fio_callback_t callback);
 
-	/* preadv and pwritev tasks are supported by Linux aio only.
-	 * On macOS or others, you will get an ENOSYS error in callback. */
-
 	static WFFileVIOTask *create_preadv_task(int fd,
 											 const struct iovec *iov,
 											 int iovcnt,
@@ -188,46 +191,53 @@ public:
 
 	/* File tasks with path name. */
 public:
-	static WFFileIOTask *create_pread_task(const std::string& pathname,
+	static WFFileIOTask *create_pread_task(const std::string& path,
 										   void *buf,
 										   size_t count,
 										   off_t offset,
 										   fio_callback_t callback);
 
-	static WFFileIOTask *create_pwrite_task(const std::string& pathname,
+	static WFFileIOTask *create_pwrite_task(const std::string& path,
 											const void *buf,
 											size_t count,
 											off_t offset,
 											fio_callback_t callback);
 
-	static WFFileVIOTask *create_preadv_task(const std::string& pathname,
+	static WFFileVIOTask *create_preadv_task(const std::string& path,
 											 const struct iovec *iov,
 											 int iovcnt,
 											 off_t offset,
 											 fvio_callback_t callback);
 
-	static WFFileVIOTask *create_pwritev_task(const std::string& pathname,
+	static WFFileVIOTask *create_pwritev_task(const std::string& path,
 											  const struct iovec *iov,
 											  int iovcnt,
 											  off_t offset,
 											  fvio_callback_t callback);
 
 public:
-	static WFTimerTask *create_timer_task(unsigned int microseconds,
-										  timer_callback_t callback);
-
-	/* timer_name has no use currently. */
-	static WFTimerTask *create_timer_task(const std::string& timer_name,
-										  unsigned int microseconds,
-										  timer_callback_t callback);
-
 	static WFTimerTask *create_timer_task(time_t seconds, long nanoseconds,
 										  timer_callback_t callback);
 
-	/* Counter is like semaphore. The callback of counter is called when
-	 * 'count' operations reach target_value & after the task is started.
-	 * It's perfectly legal to call 'count' before the task is started. */
+	/* create a named timer. */
+	static WFTimerTask *create_timer_task(const std::string& timer_name,
+										  time_t seconds, long nanoseconds,
+										  timer_callback_t callback);
 
+	/* cancel all timers under the name. */
+	static int cancel_by_name(const std::string& timer_name)
+	{
+		return WFTaskFactory::cancel_by_name(timer_name, (size_t)-1);
+	}
+
+	/* cancel at most 'max' timers under the name. */
+	static int cancel_by_name(const std::string& timer_name, size_t max);
+
+	/* timer in microseconds (deprecated) */
+	static WFTimerTask *create_timer_task(unsigned int microseconds,
+										  timer_callback_t callback);
+
+public:
 	/* Create an unnamed counter. Call counter->count() directly.
 	 * NOTE: never call count() exceeding target_value. */
 	static WFCounterTask *create_counter_task(unsigned int target_value,
@@ -243,24 +253,57 @@ public:
 
 	/* Count by a counter's name. When count_by_name(), it's safe to count
 	 * exceeding target_value. When multiple counters share a same name,
-	 * this operation will be performed on the first created. If no counter
-	 * matches the name, nothing is performed. */
-	static void count_by_name(const std::string& counter_name)
+	 * this operation will be performed on the first created. */
+	static int count_by_name(const std::string& counter_name)
 	{
-		WFTaskFactory::count_by_name(counter_name, 1);
+		return WFTaskFactory::count_by_name(counter_name, 1);
 	}
 
 	/* Count by name with a value n. When multiple counters share this name,
 	 * the operation is performed on the counters in the sequence of its
 	 * creation, and more than one counter may reach target value. */
-	static void count_by_name(const std::string& counter_name, unsigned int n);
+	static int count_by_name(const std::string& counter_name, unsigned int n);
 
 public:
-	static WFMailboxTask *create_mailbox_task(size_t size,
+	static WFMailboxTask *create_mailbox_task(void **mailbox,
+											  mailbox_callback_t callback)
+	{
+		return new WFMailboxTask(mailbox, std::move(callback));
+	}
+
+	/* Use 'user_data' as mailbox. */
+	static WFMailboxTask *create_mailbox_task(mailbox_callback_t callback)
+	{
+		return new WFMailboxTask(std::move(callback));
+	}
+
+	static WFMailboxTask *create_mailbox_task(const std::string& mailbox_name,
+											  void **mailbox,
 											  mailbox_callback_t callback);
 
-	/* Use 'user_data' as mailbox. Store only one message. */
-	static WFMailboxTask *create_mailbox_task(mailbox_callback_t callback);
+	static WFMailboxTask *create_mailbox_task(const std::string& mailbox_name,
+											  mailbox_callback_t callback);
+
+	/* The 'msg' will be sent to the all mailbox tasks under the name, and
+	 * would be lost if no task matched. */
+	static int send_by_name(const std::string& mailbox_name, void *msg)
+	{
+		return WFTaskFactory::send_by_name(mailbox_name, msg, (size_t)-1);
+	}
+
+	static int send_by_name(const std::string& mailbox_name, void *msg,
+							size_t max);
+
+	template<typename T>
+	static int send_by_name(const std::string& mailbox_name, T *const msg[],
+							size_t max);
+
+public:
+	static WFSelectorTask *create_selector_task(size_t candidates,
+												selector_callback_t callback)
+	{
+		return new WFSelectorTask(candidates, std::move(callback));
+	}
 
 public:
 	static WFConditional *create_conditional(SubTask *task, void **msgbuf)
@@ -273,10 +316,64 @@ public:
 		return new WFConditional(task);
 	}
 
+	static WFConditional *create_conditional(const std::string& cond_name,
+											 SubTask *task, void **msgbuf);
+
+	static WFConditional *create_conditional(const std::string& cond_name,
+											 SubTask *task);
+
+	static int signal_by_name(const std::string& cond_name, void *msg)
+	{
+		return WFTaskFactory::signal_by_name(cond_name, msg, (size_t)-1);
+	}
+
+	static int signal_by_name(const std::string& cond_name, void *msg,
+							  size_t max);
+
+	template<typename T>
+	static int signal_by_name(const std::string& cond_name, T *const msg[],
+							  size_t max);
+
+public:
+	static WFConditional *create_guard(const std::string& resource_name,
+									   SubTask *task);
+
+	static WFConditional *create_guard(const std::string& resource_name,
+									   SubTask *task, void **msgbuf);
+
+	/* The 'guard' is acquired after started, so call 'release_guard' after
+	   and only after the task is finished, typically in its callback.
+	   The function returns 1 if another is signaled, otherwise returns 0. */
+	static int release_guard(const std::string& resource_name, void *msg);
+
+	static int release_guard_safe(const std::string& resource_name, void *msg);
+
 public:
 	template<class FUNC, class... ARGS>
 	static WFGoTask *create_go_task(const std::string& queue_name,
 									FUNC&& func, ARGS&&... args);
+
+	/* Create 'Go' task with running time limit in seconds plus nanoseconds.
+	 * If time exceeded, state WFT_STATE_SYS_ERROR and error ETIMEDOUT
+	 * will be got in callback. */
+	template<class FUNC, class... ARGS>
+	static WFGoTask *create_timedgo_task(time_t seconds, long nanoseconds,
+										 const std::string& queue_name,
+										 FUNC&& func, ARGS&&... args);
+
+	/* Create 'Go' task on user's executor and execution queue. */
+	template<class FUNC, class... ARGS>
+	static WFGoTask *create_go_task(ExecQueue *queue, Executor *executor,
+									FUNC&& func, ARGS&&... args);
+
+	template<class FUNC, class... ARGS>
+	static WFGoTask *create_timedgo_task(time_t seconds, long nanoseconds,
+										 ExecQueue *queue, Executor *executor,
+										 FUNC&& func, ARGS&&... args);
+
+	/* For capturing 'task' itself in go task's running function. */
+	template<class FUNC, class... ARGS>
+	static void reset_go_task(WFGoTask *task, FUNC&& func, ARGS&&... args);
 
 public:
 	static WFGraphTask *create_graph_task(graph_callback_t callback)
@@ -291,6 +388,27 @@ public:
 	}
 
 	static WFDynamicTask *create_dynamic_task(dynamic_create_t create);
+
+	static WFRepeaterTask *create_repeater_task(repeated_create_t create,
+												repeater_callback_t callback)
+	{
+		return new WFRepeaterTask(std::move(create), std::move(callback));
+	}
+
+public:
+	static WFModuleTask *create_module_task(SubTask *first,
+											module_callback_t callback)
+	{
+		return new WFModuleTask(first, std::move(callback));
+	}
+
+	static WFModuleTask *create_module_task(SubTask *first, SubTask *last,
+											module_callback_t callback)
+	{
+		WFModuleTask *task = new WFModuleTask(first, std::move(callback));
+		task->sub_series()->set_last_task(last);
+		return task;
+	}
 };
 
 template<class REQ, class RESP>
@@ -300,22 +418,34 @@ private:
 	using T = WFNetworkTask<REQ, RESP>;
 
 public:
-	static T *create_client_task(TransportType type,
+	static T *create_client_task(enum TransportType type,
 								 const std::string& host,
 								 unsigned short port,
 								 int retry_max,
 								 std::function<void (T *)> callback);
 
-	static T *create_client_task(TransportType type,
+	static T *create_client_task(enum TransportType type,
 								 const std::string& url,
 								 int retry_max,
 								 std::function<void (T *)> callback);
 
-	static T *create_client_task(TransportType type,
+	static T *create_client_task(enum TransportType type,
 								 const ParsedURI& uri,
 								 int retry_max,
 								 std::function<void (T *)> callback);
 
+	static T *create_client_task(enum TransportType type,
+								 const struct sockaddr *addr,
+								 socklen_t addrlen,
+								 int retry_max,
+								 std::function<void (T *)> callback);
+
+	static T *create_client_task(enum TransportType type,
+								 const struct sockaddr *addr,
+								 socklen_t addrlen,
+								 SSL_CTX *ssl_ctx,
+								 int retry_max,
+								 std::function<void (T *)> callback);
 public:
 	static T *create_server_task(CommService *service,
 								 std::function<void (T *)>& process);
@@ -326,22 +456,29 @@ class WFThreadTaskFactory
 {
 private:
 	using T = WFThreadTask<INPUT, OUTPUT>;
-	using MT = WFMultiThreadTask<INPUT, OUTPUT>;
 
 public:
 	static T *create_thread_task(const std::string& queue_name,
-								 std::function<void (INPUT *, OUTPUT *)> routine,
-								 std::function<void (T *)> callback);
+								std::function<void (INPUT *, OUTPUT *)> routine,
+								std::function<void (T *)> callback);
 
-	static MT *create_multi_thread_task(const std::string& queue_name,
-										std::function<void (INPUT *, OUTPUT *)> routine,
-										size_t nthreads,
-										std::function<void (MT *)> callback);
+	/* Create thread task with running time limit. */
+	static T *create_thread_task(time_t seconds, long nanoseconds,
+								const std::string& queue_name,
+								std::function<void (INPUT *, OUTPUT *)> routine,
+								std::function<void (T *)> callback);
 
 public:
+	/* Create thread task on user's executor and execution queue. */
 	static T *create_thread_task(ExecQueue *queue, Executor *executor,
-								 std::function<void (INPUT *, OUTPUT *)> routine,
-								 std::function<void (T *)> callback);
+								std::function<void (INPUT *, OUTPUT *)> routine,
+								std::function<void (T *)> callback);
+
+	/* With running time limit. */
+	static T *create_thread_task(time_t seconds, long nanoseconds,
+								ExecQueue *queue, Executor *executor,
+								std::function<void (INPUT *, OUTPUT *)> routine,
+								std::function<void (T *)> callback);
 };
 
 #include "WFTaskFactory.inl"

@@ -28,8 +28,8 @@
 class CommSchedObject
 {
 public:
-	size_t get_max_load() { return this->max_load; }
-	size_t get_cur_load() { return this->cur_load; }
+	size_t get_max_load() const { return this->max_load; }
+	size_t get_cur_load() const { return this->cur_load; }
 
 private:
 	virtual CommTarget *acquire(int wait_timeout) = 0;
@@ -69,7 +69,7 @@ public:
 
 private:
 	virtual CommTarget *acquire(int wait_timeout); /* final */
-	virtual void release(int keep_alive); /* final */
+	virtual void release(); /* final */
 
 private:
 	CommSchedGroup *group;
@@ -132,7 +132,7 @@ public:
 		{
 			ret = this->comm.request(session, *target);
 			if (ret < 0)
-				(*target)->release(0);
+				(*target)->release();
 		}
 
 		return ret;
@@ -142,6 +142,11 @@ public:
 	int reply(CommSession *session)
 	{
 		return this->comm.reply(session);
+	}
+
+	int shutdown(CommSession *session)
+	{
+		return this->comm.shutdown(session);
 	}
 
 	int push(const void *buf, size_t size, CommSession *session)
@@ -165,6 +170,12 @@ public:
 		return this->comm.sleep(session);
 	}
 
+	/* Call 'unsleep' only before 'handle()' returns. */
+	int unsleep(SleepSession *session)
+	{
+		return this->comm.unsleep(session);
+	}
+
 	/* for file aio services. */
 	int io_bind(IOService *service)
 	{
@@ -185,6 +196,11 @@ public:
 	int increase_handler_thread()
 	{
 		return this->comm.increase_handler_thread();
+	}
+
+	int decrease_handler_thread()
+	{
+		return this->comm.decrease_handler_thread();
 	}
 
 private:

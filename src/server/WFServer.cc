@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <openssl/ssl.h>
 #include "CommScheduler.h"
+#include "EndpointParams.h"
 #include "WFConnection.h"
 #include "WFGlobal.h"
 #include "WFServer.h"
@@ -50,7 +51,7 @@ private:
 	std::atomic<size_t> *conn_count;
 };
 
-long WFServerBase::ssl_ctx_callback(SSL *ssl, int *al, void *arg)
+int WFServerBase::ssl_ctx_callback(SSL *ssl, int *al, void *arg)
 {
 	WFServerBase *server = (WFServerBase *)arg;
 	const char *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
@@ -65,25 +66,24 @@ long WFServerBase::ssl_ctx_callback(SSL *ssl, int *al, void *arg)
 	return SSL_TLSEXT_ERR_OK;
 }
 
-int WFServerBase::init_ssl_ctx(const char *cert_file, const char *key_file)
+SSL_CTX *WFServerBase::new_ssl_ctx(const char *cert_file, const char *key_file)
 {
 	SSL_CTX *ssl_ctx = WFGlobal::new_ssl_server_ctx();
 
 	if (!ssl_ctx)
-		return -1;
+		return NULL;
 
-	SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, NULL);
-	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file, SSL_FILETYPE_PEM) > 0 &&
+	if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) > 0 &&
 		SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) > 0 &&
+		SSL_CTX_check_private_key(ssl_ctx) > 0 &&
 		SSL_CTX_set_tlsext_servername_callback(ssl_ctx, ssl_ctx_callback) > 0 &&
 		SSL_CTX_set_tlsext_servername_arg(ssl_ctx, this) > 0)
 	{
-		this->set_ssl(ssl_ctx, this->params.ssl_accept_timeout);
-		return 0;
+		return ssl_ctx;
 	}
 
 	SSL_CTX_free(ssl_ctx);
-	return -1;
+	return NULL;
 }
 
 int WFServerBase::init(const struct sockaddr *bind_addr, socklen_t addrlen,
@@ -97,16 +97,30 @@ int WFServerBase::init(const struct sockaddr *bind_addr, socklen_t addrlen,
 			timeout = this->params.receive_timeout;
 	}
 
+	if (this->params.transport_type == TT_TCP_SSL ||
+		this->params.transport_type == TT_SCTP_SSL)
+	{
+		if (!cert_file || !key_file)
+		{
+			errno = EINVAL;
+			return -1;
+		}
+	}
+
 	if (this->CommService::init(bind_addr, addrlen, -1, timeout) < 0)
 		return -1;
 
-	if (key_file && cert_file)
+	if (cert_file && key_file && this->params.transport_type != TT_UDP)
 	{
-		if (this->init_ssl_ctx(cert_file, key_file) < 0)
+		SSL_CTX *ssl_ctx = this->new_ssl_ctx(cert_file, key_file);
+
+		if (!ssl_ctx)
 		{
 			this->deinit();
 			return -1;
 		}
+
+		this->set_ssl(ssl_ctx, this->params.ssl_accept_timeout);
 	}
 
 	this->scheduler = WFGlobal::get_scheduler();
@@ -119,10 +133,34 @@ int WFServerBase::create_listen_fd()
 	{
 		const struct sockaddr *bind_addr;
 		socklen_t addrlen;
+		int type, protocol;
 		int reuse = 1;
 
+		switch (this->params.transport_type)
+		{
+		case TT_TCP:
+		case TT_TCP_SSL:
+			type = SOCK_STREAM;
+			protocol = 0;
+			break;
+		case TT_UDP:
+			type = SOCK_DGRAM;
+			protocol = 0;
+			break;
+#ifdef IPPROTO_SCTP
+		case TT_SCTP:
+		case TT_SCTP_SSL:
+			type = SOCK_STREAM;
+			protocol = IPPROTO_SCTP;
+			break;
+#endif
+		default:
+			errno = EPROTONOSUPPORT;
+			return -1;
+		}
+
 		this->get_addr(&bind_addr, &addrlen);
-		this->listen_fd = socket(bind_addr->sa_family, SOCK_STREAM, 0);
+		this->listen_fd = socket(bind_addr->sa_family, type, protocol);
 		if (this->listen_fd >= 0)
 		{
 			setsockopt(this->listen_fd, SOL_SOCKET, SO_REUSEADDR,

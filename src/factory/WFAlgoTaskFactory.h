@@ -23,7 +23,6 @@
 #include <string>
 #include <vector>
 #include "WFTask.h"
-#include "MapReduce.h"
 
 namespace algorithm
 {
@@ -59,6 +58,78 @@ struct MergeOutput
 	T *last;
 };
 
+template<typename T>
+struct ShuffleInput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct ShuffleOutput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct RemoveInput
+{
+	T *first;
+	T *last;
+	T value;
+};
+
+template<typename T>
+struct RemoveOutput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct UniqueInput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct UniqueOutput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct ReverseInput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct ReverseOutput
+{
+	T *first;
+	T *last;
+};
+
+template<typename T>
+struct RotateInput
+{
+	T *first;
+	T *middle;
+	T *last;
+};
+
+template<typename T>
+struct RotateOutput
+{
+	T *first;
+	T *last;
+};
+
 template<typename KEY = std::string, typename VAL = std::string>
 using ReduceInput = std::vector<std::pair<KEY, VAL>>;
 
@@ -79,11 +150,35 @@ using WFMergeTask = WFThreadTask<algorithm::MergeInput<T>,
 template<typename T>
 using merge_callback_t = std::function<void (WFMergeTask<T> *)>;
 
-template<typename KEY = std::string, typename VAL = std::string>
-using WFReduceTask = WFThreadTask<algorithm::ReduceInput<KEY, VAL>,
-								  algorithm::ReduceOutput<KEY, VAL>>;
-template<typename KEY = std::string, typename VAL = std::string>
-using reduce_callback_t = std::function<void (WFReduceTask<KEY, VAL> *)>;
+template<typename T>
+using WFShuffleTask = WFThreadTask<algorithm::ShuffleInput<T>,
+								   algorithm::ShuffleOutput<T>>;
+template<typename T>
+using shuffle_callback_t = std::function<void (WFShuffleTask<T> *)>;
+
+template<typename T>
+using WFRemoveTask = WFThreadTask<algorithm::RemoveInput<T>,
+								  algorithm::RemoveOutput<T>>;
+template<typename T>
+using remove_callback_t = std::function<void (WFRemoveTask<T> *)>;
+
+template<typename T>
+using WFUniqueTask = WFThreadTask<algorithm::UniqueInput<T>,
+								  algorithm::UniqueOutput<T>>;
+template<typename T>
+using unique_callback_t = std::function<void (WFUniqueTask<T> *)>;
+
+template<typename T>
+using WFReverseTask = WFThreadTask<algorithm::ReverseInput<T>,
+								   algorithm::ReverseOutput<T>>;
+template<typename T>
+using reverse_callback_t = std::function<void (WFReverseTask<T> *)>;
+
+template<typename T>
+using WFRotateTask = WFThreadTask<algorithm::RotateInput<T>,
+								  algorithm::RotateOutput<T>>;
+template<typename T>
+using rotate_callback_t = std::function<void (WFRotateTask<T> *)>;
 
 class WFAlgoTaskFactory
 {
@@ -98,6 +193,17 @@ public:
 										   T *first, T *last,
 										   CMP compare,
 										   CB callback);
+
+	template<typename T, class CB = sort_callback_t<T>>
+	static WFSortTask<T> *create_psort_task(const std::string& queue_name,
+											T *first, T *last,
+											CB callback);
+
+	template<typename T, class CMP, class CB = sort_callback_t<T>>
+	static WFSortTask<T> *create_psort_task(const std::string& queue_name,
+											T *first, T *last,
+											CMP compare,
+											CB callback);
 
 	template<typename T, class CB = merge_callback_t<T>>
 	static WFMergeTask<T> *create_merge_task(const std::string& queue_name,
@@ -114,33 +220,37 @@ public:
 											 CMP compare,
 											 CB callback);
 
-	template<typename T, class CB = sort_callback_t<T>>
-	static WFSortTask<T> *create_psort_task(const std::string& queue_name,
-											T *first, T *last,
-											CB callback);
+	template<typename T, class CB = shuffle_callback_t<T>>
+	static WFShuffleTask<T> *create_shuffle_task(const std::string& queue_name,
+												 T *first, T *last,
+												 CB callback);
 
-	template<typename T, class CMP, class CB = sort_callback_t<T>>
-	static WFSortTask<T> *create_psort_task(const std::string& queue_name,
-											T *first, T *last,
-											CMP compare,
-											CB callback);
+	template<typename T, class URBG, class CB = shuffle_callback_t<T>>
+	static WFShuffleTask<T> *create_shuffle_task(const std::string& queue_name,
+												 T *first, T *last,
+												 URBG generator,
+												 CB callback);
 
-	template<typename KEY = std::string, typename VAL = std::string,
-			 class RED = algorithm::reduce_function_t<KEY, VAL>,
-			 class CB = reduce_callback_t<KEY, VAL>>
-	static WFReduceTask<KEY, VAL> *
-	create_reduce_task(const std::string& queue_name,
-					   RED reduce,
-					   CB callback);
+	template<typename T, class CB = remove_callback_t<T>>
+	static WFRemoveTask<T> *create_remove_task(const std::string& queue_name,
+											   T *first, T *last,
+											   T value,
+											   CB callback);
 
-	template<typename KEY = std::string, typename VAL = std::string,
-			 class RED = algorithm::reduce_function_t<KEY, VAL>,
-			 class CB = reduce_callback_t<KEY, VAL>>
-	static WFReduceTask<KEY, VAL> *
-	create_reduce_task(const std::string& queue_name,
-					   algorithm::ReduceInput<KEY, VAL> input,
-					   RED reduce,
-					   CB callback);
+	template<typename T, class CB = unique_callback_t<T>>
+	static WFUniqueTask<T> *create_unique_task(const std::string& queue_name,
+											   T *first, T *last,
+											   CB callback);
+
+	template<typename T, class CB = reverse_callback_t<T>>
+	static WFReverseTask<T> *create_reverse_task(const std::string& queue_name,
+												 T *first, T *last,
+												 CB callback);
+
+	template<typename T, class CB = rotate_callback_t<T>>
+	static WFRotateTask<T> *create_rotate_task(const std::string& queue_name,
+											   T *first, T *middle, T *last,
+											   CB callback);
 };
 
 #include "WFAlgoTaskFactory.inl"

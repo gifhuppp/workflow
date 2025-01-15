@@ -39,6 +39,12 @@ WFGraphNode::~WFGraphNode()
 {
 	if (this->user_data)
 	{
+		if (series_of(this)->is_canceled())
+		{
+			for (WFGraphNode *node : this->successors)
+				series_of(node)->SeriesWork::cancel();
+		}
+
 		for (WFGraphNode *node : this->successors)
 			node->WFCounterTask::count();
 	}
@@ -94,7 +100,7 @@ WFGraphTask::~WFGraphTask()
 	{
 		for (i = 0; i < this->parallel->size(); i++)
 		{
-			series = const_cast<SeriesWork *>(this->parallel->series_at(i));
+			series = this->parallel->series_at(i);
 			series->unset_last_task();
 		}
 

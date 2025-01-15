@@ -34,7 +34,6 @@
 #include "WFResourcePool.h"
 #include "WFNameService.h"
 #include "WFDnsResolver.h"
-#include "EndpointParams.h"
 
 /**
  * @file    WFGlobal.h
@@ -55,7 +54,8 @@ struct WFGlobalSettings
 	int dns_threads;
 	int poller_threads;
 	int handler_threads;
-	int compute_threads;			///< auto-set by system CPU number if value<=0
+	int compute_threads;			///< auto-set by system CPU number if value<0
+	int fio_max_events;
 	const char *resolv_conf_path;
 	const char *hosts_path;
 };
@@ -67,12 +67,13 @@ static constexpr struct WFGlobalSettings GLOBAL_SETTINGS_DEFAULT =
 {
 	.endpoint_params	=	ENDPOINT_PARAMS_DEFAULT,
 	.dns_server_params	=	ENDPOINT_PARAMS_DEFAULT,
-	.dns_ttl_default	=	12 * 3600,
-	.dns_ttl_min		=	180,
+	.dns_ttl_default	=	3600,
+	.dns_ttl_min		=	60,
 	.dns_threads		=	4,
 	.poller_threads		=	4,
 	.handler_threads	=	20,
 	.compute_threads	=	-1,
+	.fio_max_events		=	4096,
 	.resolv_conf_path	=	"/etc/resolv.conf",
 	.hosts_path			=	"/etc/hosts",
 };
@@ -123,8 +124,29 @@ public:
 
 	static const char *get_error_string(int state, int error);
 
+	static bool increase_handler_thread()
+	{
+		return WFGlobal::get_scheduler()->increase_handler_thread() == 0;
+	}
+
+	static bool decrease_handler_thread()
+	{
+		return WFGlobal::get_scheduler()->decrease_handler_thread() == 0;
+	}
+
+	static bool increase_compute_thread()
+	{
+		return WFGlobal::get_compute_executor()->increase_thread() == 0;
+	}
+
+	static bool decrease_compute_thread()
+	{
+		return WFGlobal::get_compute_executor()->decrease_thread() == 0;
+	}
+
 	// Internal usage only
 public:
+	static bool is_scheduler_created();
 	static class CommScheduler *get_scheduler();
 	static SSL_CTX *get_ssl_client_ctx();
 	static SSL_CTX *new_ssl_server_ctx();
@@ -157,8 +179,8 @@ public:
 	}
 
 public:
-	static void sync_operation_begin();
-	static void sync_operation_end();
+	static int sync_operation_begin();
+	static void sync_operation_end(int cookie);
 
 private:
 	static struct WFGlobalSettings settings_;

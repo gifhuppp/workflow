@@ -14,6 +14,7 @@
   limitations under the License.
 
   Authors: Wu Jiaxu (wujiaxu@sogou-inc.com)
+           Xie Han (xiehan@sogou-inc.com)
 */
 
 #include <ctype.h>
@@ -22,47 +23,39 @@
 #include <algorithm>
 #include "StringUtil.h"
 
-static int __htoi(unsigned char *s)
+static int __hex_to_int(const char s[2])
 {
-	int value;
-	int c;
+	int value = 16;
 
-	c = s[0];
-	if (isupper(c))
-		c = tolower(c);
+	if (s[0] <= '9')
+		value *= s[0] - '0';
+	else
+		value *= toupper(s[0]) - 'A' + 10;
 
-	value = (c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10) * 16;
+	if (s[1] <= '9')
+		value += s[1] - '0';
+	else
+		value += toupper(s[1]) - 'A' + 10;
 
-	c = s[1];
-	if (isupper(c))
-		c = tolower(c);
-
-	value += (c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10);
 	return value;
 }
 
-static inline char __itoh(int n)
+static inline char __int_to_hex(int n)
 {
-	if (n > 9)
-		return n - 10 + 'A';
-
-	return n + '0';
+	return n <= 9 ? n + '0' : n - 10 + 'A';
 }
 
-size_t StringUtil::url_decode(char *str, size_t len)
+static size_t __url_decode(char *str)
 {
 	char *dest = str;
 	char *data = str;
 
-	while (len--)
+	while (*data)
 	{
-		if (*data == '%' && len >= 2
-			&& isxdigit(*(data + 1))
-			&& isxdigit(*(data + 2)))
+		if (*data == '%' && isxdigit(data[1]) && isxdigit(data[2]))
 		{
-			*dest = __htoi((unsigned char *)data + 1);
+			*dest = __hex_to_int(data + 1);
 			data += 2;
-			len -= 2;
 		}
 		else if (*data == '+')
 			*dest = ' ';
@@ -79,39 +72,33 @@ size_t StringUtil::url_decode(char *str, size_t len)
 
 void StringUtil::url_decode(std::string& str)
 {
-	if (str.empty())
-		return;
-
-	char ch = str.back();
-
-	str.pop_back();
-	str.push_back(ch);
-
-	size_t sz = url_decode(const_cast<char *>(str.c_str()), str.size());
-
-	str.resize(sz);
+	str.resize(__url_decode(const_cast<char *>(str.c_str())));
 }
 
 std::string StringUtil::url_encode(const std::string& str)
 {
-	std::string res;
 	const char *cur = str.c_str();
-	const char *ed = cur + str.size();
+	const char *end = cur + str.size();
+	std::string res;
 
-	while (cur < ed)
+	while (cur < end)
 	{
-		if (*cur == ' ')
-			res += '+';
-		else if (isalnum(*cur) || *cur == '-' || *cur == '_' || *cur == '.'
-				|| *cur == '!' || *cur == '~' || *cur == '*' || *cur == '\''
-				|| *cur == '(' || *cur == ')' || *cur == ':' || *cur == '/'
-				|| *cur == '@' || *cur == '?' || *cur == '#' || *cur == '&')
+		if (isalnum(*cur) || *cur == '-' || *cur == '_' || *cur == '.' ||
+			*cur == '!' || *cur == '~' || *cur == '*' || *cur == '\'' ||
+			*cur == '(' || *cur == ')' || *cur == ':' || *cur == '/' ||
+			*cur == '@' || *cur == '?' || *cur == '#' || *cur == '&')
+		{
 			res += *cur;
+		}
+		else if (*cur == ' ')
+		{
+			res += '+';
+		}
 		else
 		{
 			res += '%';
-			res += __itoh(((const unsigned char)(*cur)) >> 4);
-			res += __itoh(((const unsigned char)(*cur)) % 16);
+			res += __int_to_hex(((const unsigned char)(*cur)) >> 4);
+			res += __int_to_hex(((const unsigned char)(*cur)) % 16);
 		}
 
 		cur++;
@@ -122,23 +109,27 @@ std::string StringUtil::url_encode(const std::string& str)
 
 std::string StringUtil::url_encode_component(const std::string& str)
 {
-	std::string res;
 	const char *cur = str.c_str();
-	const char *ed = cur + str.size();
+	const char *end = cur + str.size();
+	std::string res;
 
-	while (cur < ed)
+	while (cur < end)
 	{
-		if (*cur == ' ')
-			res += '+';
-		else if (isalnum(*cur) || *cur == '-' || *cur == '_' || *cur == '.'
-				|| *cur == '!' || *cur == '~' || *cur == '*' || *cur == '\''
-				|| *cur == '(' || *cur == ')')
+		if (isalnum(*cur) || *cur == '-' || *cur == '_' || *cur == '.' ||
+			*cur == '!' || *cur == '~' || *cur == '*' || *cur == '\'' ||
+			*cur == '(' || *cur == ')')
+		{
 			res += *cur;
+		}
+		else if (*cur == ' ')
+		{
+			res += '+';
+		}
 		else
 		{
 			res += '%';
-			res += __itoh(((const unsigned char)(*cur)) >> 4);
-			res += __itoh(((const unsigned char)(*cur)) % 16);
+			res += __int_to_hex(((const unsigned char)(*cur)) >> 4);
+			res += __int_to_hex(((const unsigned char)(*cur)) % 16);
 		}
 
 		cur++;
@@ -149,19 +140,19 @@ std::string StringUtil::url_encode_component(const std::string& str)
 
 std::vector<std::string> StringUtil::split(const std::string& str, char sep)
 {
-	std::vector<std::string> res;
-	std::string::const_iterator start = str.begin();
+	std::string::const_iterator cur = str.begin();
 	std::string::const_iterator end = str.end();
-	std::string::const_iterator next = find(start, end, sep);
+	std::string::const_iterator next = find(cur, end, sep);
+	std::vector<std::string> res;
 
 	while (next != end)
 	{
-		res.emplace_back(start, next);
-		start = next + 1;
-		next = std::find(start, end, sep);
+		res.emplace_back(cur, next);
+		cur = next + 1;
+		next = std::find(cur, end, sep);
 	}
 
-	res.emplace_back(start, next);
+	res.emplace_back(cur, next);
 	return res;
 }
 
@@ -169,21 +160,21 @@ std::vector<std::string> StringUtil::split_filter_empty(const std::string& str,
 														char sep)
 {
 	std::vector<std::string> res;
-	std::string::const_iterator start = str.begin();
+	std::string::const_iterator cur = str.begin();
 	std::string::const_iterator end = str.end();
-	std::string::const_iterator next = find(start, end, sep);
+	std::string::const_iterator next = find(cur, end, sep);
 
 	while (next != end)
 	{
-		if (start < next)
-			res.emplace_back(start, next);
+		if (cur < next)
+			res.emplace_back(cur, next);
 
-		start = next + 1;
-		next = find(start, end, sep);
+		cur = next + 1;
+		next = find(cur, end, sep);
 	}
 
-	if (start < next)
-		res.emplace_back(start, next);
+	if (cur < next)
+		res.emplace_back(cur, next);
 
 	return res;
 }
@@ -194,27 +185,27 @@ std::string StringUtil::strip(const std::string& str)
 
 	if (!str.empty())
 	{
-		const char *st = str.c_str();
-		const char *ed = st + str.size() - 1;
+		const char *cur = str.c_str();
+		const char *end = cur + str.size();
 
-		while (st <= ed)
+		while (cur < end)
 		{
-			if (!isspace(*st))
+			if (!isspace(*cur))
 				break;
 
-			st++;
+			cur++;
 		}
 
-		while (ed >= st)
+		while (end > cur)
 		{
-			if (!isspace(*ed))
+			if (!isspace(*(end - 1)))
 				break;
 
-			ed--;
+			end--;
 		}
 
-		if (ed >= st)
-			res.assign(st, ed - st + 1);
+		if (end > cur)
+			res.assign(cur, end - cur);
 	}
 
 	return res;

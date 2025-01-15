@@ -105,9 +105,9 @@ public:
 
 		list_for_each_safe(pos, tmp, &this->not_use)
 		{
-			e = list_entry(&pos, Handle, list);
+			e = list_entry(pos, Handle, list);
 			assert(e->ref == 1);
-			rb_erase(&e->rb);
+			rb_erase(&e->rb, &this->cache_map);
 			this->erase_node(e);
 		}
 	}

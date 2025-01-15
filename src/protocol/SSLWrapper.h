@@ -33,19 +33,11 @@ public:
 
 protected:
 	SSL *ssl;
-	int ssl_ex_data_index;
 
 public:
 	SSLHandshaker(SSL *ssl)
 	{
 		this->ssl = ssl;
-		this->ssl_ex_data_index = 0;
-	}
-
-	SSLHandshaker(SSL *ssl, int ssl_ex_data_index)
-	{
-		this->ssl = ssl;
-		this->ssl_ex_data_index = ssl_ex_data_index;
 	}
 
 public:
@@ -67,21 +59,12 @@ protected:
 
 protected:
 	SSL *ssl;
-	int ssl_ex_data_index;
 
 public:
-	SSLWrapper(ProtocolMessage *msg, SSL *ssl) :
-		ProtocolWrapper(msg)
+	SSLWrapper(ProtocolMessage *message, SSL *ssl) :
+		ProtocolWrapper(message)
 	{
 		this->ssl = ssl;
-		this->ssl_ex_data_index = 0;
-	}
-
-	SSLWrapper(ProtocolMessage *msg, SSL *ssl, int ssl_ex_data_index) :
-		ProtocolWrapper(msg)
-	{
-		this->ssl = ssl;
-		this->ssl_ex_data_index = ssl_ex_data_index;
 	}
 
 public:
@@ -89,19 +72,20 @@ public:
 	SSLWrapper& operator = (SSLWrapper&& wrapper) = default;
 };
 
-class ServiceSSLWrapper : public SSLWrapper
+class ServerSSLWrapper : public SSLWrapper
 {
 protected:
 	virtual int append(const void *buf, size_t *size);
 
 public:
-	ServiceSSLWrapper(ProtocolMessage *msg, SSL *ssl) : SSLWrapper(msg, ssl)
+	ServerSSLWrapper(ProtocolMessage *message, SSL *ssl) :
+		SSLWrapper(message, ssl)
 	{
 	}
 
 public:
-	ServiceSSLWrapper(ServiceSSLWrapper&& wrapper) = default;
-	ServiceSSLWrapper& operator = (ServiceSSLWrapper&& wrapper) = default;
+	ServerSSLWrapper(ServerSSLWrapper&& wrapper) = default;
+	ServerSSLWrapper& operator = (ServerSSLWrapper&& wrapper) = default;
 };
 
 }

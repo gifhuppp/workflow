@@ -19,6 +19,7 @@
 #ifndef _COMMREQUEST_H_
 #define _COMMREQUEST_H_
 
+#include <errno.h>
 #include <stddef.h>
 #include "SubTask.h"
 #include "Communicator.h"
@@ -40,7 +41,14 @@ public:
 	void set_wait_timeout(int timeout) { this->wait_timeout = timeout; }
 
 public:
-	virtual void dispatch();
+	virtual void dispatch()
+	{
+		if (this->scheduler->request(this, this->object, this->wait_timeout,
+									 &this->target) < 0)
+		{
+			this->handle(CS_STATE_ERROR, errno);
+		}
+	}
 
 protected:
 	int state;

@@ -16,7 +16,8 @@
   Author: Xie Han (xiehan@sogou-inc.com)
 */
 
-#include <assert.h>
+#include <stdlib.h>
+#include <random>
 #include <algorithm>
 #include <vector>
 #include <functional>
@@ -91,7 +92,7 @@ void __WFMergeTask<T>::execute()
 	else
 	{
 		output->last = std::merge(input->first1, input->last1,
-								  input->first2, input->first2,
+								  input->first2, input->last2,
 								  input->d_first);
 	}
 
@@ -110,7 +111,6 @@ protected:
 		if (this->flag)
 			return series_of(this)->pop();
 
-		assert(this->state == WFT_STATE_SUCCESS);
 		return this->WFSortTask<T>::done();
 	}
 
@@ -252,7 +252,7 @@ void __WFMergeTaskCmp<T, CMP>::execute()
 	else
 	{
 		output->last = std::merge(input->first1, input->last1,
-								  input->first2, input->first2,
+								  input->first2, input->last2,
 								  input->d_first,
 								  std::move(this->compare));
 	}
@@ -272,7 +272,6 @@ protected:
 		if (this->flag)
 			return series_of(this)->pop();
 
-		assert(this->state == WFT_STATE_SUCCESS);
 		return this->WFSortTask<T>::done();
 	}
 
@@ -425,76 +424,228 @@ WFSortTask<T> *WFAlgoTaskFactory::create_psort_task(const std::string& name,
 										  std::move(callback));
 }
 
-/****************** MapReduce ******************/
+/****************** Shuffle ******************/
 
-template<typename KEY, typename VAL>
-class __WFReduceTask : public WFReduceTask<KEY, VAL>
+template<typename T>
+class __WFShuffleTask : public WFShuffleTask<T>
 {
 protected:
-	virtual void execute();
-
-protected:
-	algorithm::reduce_function_t<KEY, VAL> reduce;
-
-public:
-	__WFReduceTask(ExecQueue *queue, Executor *executor,
-				   algorithm::reduce_function_t<KEY, VAL>&& red,
-				   reduce_callback_t<KEY, VAL>&& cb) :
-		WFReduceTask<KEY, VAL>(queue, executor, std::move(cb)),
-		reduce(std::move(red))
+	virtual void execute()
 	{
+		std::shuffle(this->input.first, this->input.last,
+					 std::mt19937_64(rand()));
+		this->output.first = this->input.first;
+		this->output.last = this->input.last;
 	}
 
-	__WFReduceTask(ExecQueue *queue, Executor *executor,
-				   algorithm::ReduceInput<KEY, VAL>&& input,
-				   algorithm::reduce_function_t<KEY, VAL>&& red,
-				   reduce_callback_t<KEY, VAL>&& cb) :
-		WFReduceTask<KEY, VAL>(queue, executor, std::move(cb)),
-		reduce(std::move(red))
+public:
+	__WFShuffleTask(ExecQueue *queue, Executor *executor,
+					T *first, T *last,
+					shuffle_callback_t<T>&& cb) :
+		WFShuffleTask<T>(queue, executor, std::move(cb))
 	{
-		this->input = std::move(input);
+		this->input.first = first;
+		this->input.last = last;
+		this->output.first = NULL;
+		this->output.last = NULL;
 	}
 };
 
-template<class KEY, class VAL>
-void __WFReduceTask<KEY, VAL>::execute()
+template<typename T, class URBG>
+class __WFShuffleTaskGen : public __WFShuffleTask<T>
 {
-	algorithm::Reducer<KEY, VAL> reducer;
-	auto iter = this->input.begin();
-
-	while (iter != this->input.end())
+protected:
+	virtual void execute()
 	{
-		reducer.insert(std::move(iter->first), std::move(iter->second));
-		iter++;
+		std::shuffle(this->input.first, this->input.last,
+					 std::move(this->generator));
+		this->output.first = this->input.first;
+		this->output.last = this->input.last;
 	}
 
-	this->input.clear();
-	reducer.start(this->reduce, &this->output);
+protected:
+	URBG generator;
+
+public:
+	__WFShuffleTaskGen(ExecQueue *queue, Executor *executor,
+					   T *first, T *last, URBG&& gen,
+					   shuffle_callback_t<T>&& cb) :
+		__WFShuffleTask<T>(queue, executor, std::move(cb)),
+		generator(std::move(gen))
+	{
+	}
+};
+
+template<typename T, class CB>
+WFShuffleTask<T> *WFAlgoTaskFactory::create_shuffle_task(const std::string& name,
+														 T *first, T *last,
+														 CB callback)
+{
+	return new __WFShuffleTask<T>(WFGlobal::get_exec_queue(name),
+								  WFGlobal::get_compute_executor(),
+								  first, last,
+								  std::move(callback));
 }
 
-template<typename KEY, typename VAL, class RED, class CB>
-WFReduceTask<KEY, VAL> *
-WFAlgoTaskFactory::create_reduce_task(const std::string& name,
-									  RED reduce,
-									  CB callback)
+template<typename T, class URBG, class CB>
+WFShuffleTask<T> *WFAlgoTaskFactory::create_shuffle_task(const std::string& name,
+														 T *first, T *last,
+														 URBG generator,
+														 CB callback)
 {
-	return new __WFReduceTask<KEY, VAL>(WFGlobal::get_exec_queue(name),
-										WFGlobal::get_compute_executor(),
-										std::move(reduce),
-										std::move(callback));
+	return new __WFShuffleTaskGen<T, URBG>(WFGlobal::get_exec_queue(name),
+										   WFGlobal::get_compute_executor(),
+										   first, last, std::move(generator),
+										   std::move(callback));
 }
 
-template<typename KEY, typename VAL, class RED, class CB>
-WFReduceTask<KEY, VAL> *
-WFAlgoTaskFactory::create_reduce_task(const std::string& name,
-									  algorithm::ReduceInput<KEY, VAL> input,
-									  RED reduce,
-									  CB callback)
+/****************** Remove ******************/
+
+template<typename T>
+class __WFRemoveTask : public WFRemoveTask<T>
 {
-	return new __WFReduceTask<KEY, VAL>(WFGlobal::get_exec_queue(name),
-										WFGlobal::get_compute_executor(),
-										std::move(input),
-										std::move(reduce),
-										std::move(callback));
+protected:
+	virtual void execute()
+	{
+		this->output.last = std::remove(this->input.first, this->input.last,
+										this->input.value);
+		this->output.first = this->input.first;
+	}
+
+public:
+	__WFRemoveTask(ExecQueue *queue, Executor *executor,
+				   T *first, T *last, T&& value,
+				   remove_callback_t<T>&& cb) :
+		WFRemoveTask<T>(queue, executor, std::move(cb))
+	{
+		this->input.first = first;
+		this->input.last = last;
+		this->input.value = std::move(value);
+		this->output.first = NULL;
+		this->output.last = NULL;
+	}
+};
+
+template<typename T, class CB>
+WFRemoveTask<T> *WFAlgoTaskFactory::create_remove_task(const std::string& name,
+													   T *first, T *last,
+													   T value,
+													   CB callback)
+{
+	return new __WFRemoveTask<T>(WFGlobal::get_exec_queue(name),
+								 WFGlobal::get_compute_executor(),
+								 first, last, std::move(value),
+								 std::move(callback));
+}
+
+/****************** Unique ******************/
+
+template<typename T>
+class __WFUniqueTask : public WFUniqueTask<T>
+{
+protected:
+	virtual void execute()
+	{
+		this->output.last = std::unique(this->input.first, this->input.last);
+		this->output.first = this->input.first;
+	}
+
+public:
+	__WFUniqueTask(ExecQueue *queue, Executor *executor,
+				   T *first, T *last,
+				   unique_callback_t<T>&& cb) :
+		WFUniqueTask<T>(queue, executor, std::move(cb))
+	{
+		this->input.first = first;
+		this->input.last = last;
+		this->output.first = NULL;
+		this->output.last = NULL;
+	}
+};
+
+template<typename T, class CB>
+WFUniqueTask<T> *WFAlgoTaskFactory::create_unique_task(const std::string& name,
+													   T *first, T *last,
+													   CB callback)
+{
+	return new __WFUniqueTask<T>(WFGlobal::get_exec_queue(name),
+								 WFGlobal::get_compute_executor(),
+								 first, last,
+								 std::move(callback));
+}
+
+/****************** Reverse ******************/
+
+template<typename T>
+class __WFReverseTask : public WFReverseTask<T>
+{
+protected:
+	virtual void execute()
+	{
+		std::reverse(this->input.first, this->input.last);
+		this->output.first = this->input.first;
+		this->output.last = this->input.last;
+	}
+
+public:
+	__WFReverseTask(ExecQueue *queue, Executor *executor,
+					T *first, T *last,
+					reverse_callback_t<T>&& cb) :
+		WFReverseTask<T>(queue, executor, std::move(cb))
+	{
+		this->input.first = first;
+		this->input.last = last;
+		this->output.first = NULL;
+		this->output.last = NULL;
+	}
+};
+
+template<typename T, class CB>
+WFReverseTask<T> *WFAlgoTaskFactory::create_reverse_task(const std::string& name,
+														 T *first, T *last,
+														 CB callback)
+{
+	return new __WFReverseTask<T>(WFGlobal::get_exec_queue(name),
+								  WFGlobal::get_compute_executor(),
+								  first, last,
+								  std::move(callback));
+}
+
+/****************** Rotate ******************/
+
+template<typename T>
+class __WFRotateTask : public WFRotateTask<T>
+{
+protected:
+	virtual void execute()
+	{
+		std::rotate(this->input.first, this->input.middle, this->input.last);
+		this->output.first = this->input.first;
+		this->output.last = this->input.last;
+	}
+
+public:
+	__WFRotateTask(ExecQueue *queue, Executor *executor,
+					T *first, T* middle, T *last,
+					rotate_callback_t<T>&& cb) :
+		WFRotateTask<T>(queue, executor, std::move(cb))
+	{
+		this->input.first = first;
+		this->input.middle = middle;
+		this->input.last = last;
+		this->output.first = NULL;
+		this->output.last = NULL;
+	}
+};
+
+template<typename T, class CB>
+WFRotateTask<T> *WFAlgoTaskFactory::create_rotate_task(const std::string& name,
+													   T *first, T *middle, T *last,
+													   CB callback)
+{
+	return new __WFRotateTask<T>(WFGlobal::get_exec_queue(name),
+								 WFGlobal::get_compute_executor(),
+								 first, middle, last,
+								 std::move(callback));
 }
 

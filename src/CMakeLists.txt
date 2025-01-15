@@ -21,7 +21,6 @@ endif ()
 add_subdirectory(kernel)
 add_subdirectory(util)
 add_subdirectory(manager)
-add_subdirectory(algorithm)
 add_subdirectory(protocol)
 add_subdirectory(factory)
 add_subdirectory(nameservice)
@@ -31,7 +30,6 @@ add_subdirectory(client)
 add_dependencies(kernel LINK_HEADERS)
 add_dependencies(util LINK_HEADERS)
 add_dependencies(manager LINK_HEADERS)
-add_dependencies(algorithm LINK_HEADERS)
 add_dependencies(protocol LINK_HEADERS)
 add_dependencies(factory LINK_HEADERS)
 add_dependencies(nameservice LINK_HEADERS)
@@ -46,7 +44,6 @@ add_library(
 	$<TARGET_OBJECTS:kernel>
 	$<TARGET_OBJECTS:util>
 	$<TARGET_OBJECTS:manager>
-	$<TARGET_OBJECTS:algorithm>
 	$<TARGET_OBJECTS:protocol>
 	$<TARGET_OBJECTS:factory>
 	$<TARGET_OBJECTS:nameservice>
@@ -59,7 +56,6 @@ add_library(
 	$<TARGET_OBJECTS:kernel>
 	$<TARGET_OBJECTS:util>
 	$<TARGET_OBJECTS:manager>
-	$<TARGET_OBJECTS:algorithm>
 	$<TARGET_OBJECTS:protocol>
 	$<TARGET_OBJECTS:factory>
 	$<TARGET_OBJECTS:nameservice>
@@ -69,12 +65,14 @@ add_library(
 
 if(ANDROID)
 	target_link_libraries(${SHARED_LIB_NAME} ssl crypto c)
+	target_link_libraries(${STATIC_LIB_NAME} ssl crypto c)
 else()
 	target_link_libraries(${SHARED_LIB_NAME} OpenSSL::SSL OpenSSL::Crypto pthread)
+	target_link_libraries(${STATIC_LIB_NAME} OpenSSL::SSL OpenSSL::Crypto pthread)
 endif ()
 
 set_target_properties(${STATIC_LIB_NAME} PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
-set_target_properties(${SHARED_LIB_NAME} PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
+set_target_properties(${SHARED_LIB_NAME} PROPERTIES OUTPUT_NAME ${PROJECT_NAME} VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 
 if (KAFKA STREQUAL "y")
 	add_dependencies(client_kafka LINK_HEADERS)
@@ -102,10 +100,11 @@ if (KAFKA STREQUAL "y")
 	)
 	if (APPLE)
 		target_link_libraries(${KAFKA_SHARED_LIB_NAME}
-							  workflow z lz4 zstd ${SNAPPY_LIB}
-							  OpenSSL::SSL OpenSSL::Crypto pthread)
+							  ${SHARED_LIB_NAME} z lz4 zstd ${SNAPPY_LIB})
+	else ()
+		target_link_libraries(${KAFKA_SHARED_LIB_NAME} ${SHARED_LIB_NAME})
 	endif ()
-	set_target_properties(${KAFKA_SHARED_LIB_NAME} PROPERTIES OUTPUT_NAME "wfkafka")
+	set_target_properties(${KAFKA_SHARED_LIB_NAME} PROPERTIES OUTPUT_NAME "wfkafka" VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 endif ()
 
 install(
@@ -133,3 +132,17 @@ if (KAFKA STREQUAL "y")
 	)
 endif ()
 
+target_include_directories(${STATIC_LIB_NAME} BEFORE PUBLIC
+	"$<BUILD_INTERFACE:${INC_DIR}>"
+	"$<INSTALL_INTERFACE:${INC_DIR}>")
+target_include_directories(${SHARED_LIB_NAME} BEFORE PUBLIC
+	"$<BUILD_INTERFACE:${INC_DIR}>"
+	"$<INSTALL_INTERFACE:${INC_DIR}>")
+if (KAFKA STREQUAL "y")
+	target_include_directories(${KAFKA_STATIC_LIB_NAME} BEFORE PUBLIC
+		"$<BUILD_INTERFACE:${INC_DIR}>"
+		"$<INSTALL_INTERFACE:${INC_DIR}>")
+	target_include_directories(${KAFKA_SHARED_LIB_NAME} BEFORE PUBLIC
+		"$<BUILD_INTERFACE:${INC_DIR}>"
+		"$<INSTALL_INTERFACE:${INC_DIR}>")
+endif ()

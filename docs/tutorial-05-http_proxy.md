@@ -39,6 +39,7 @@ int main(int argc, char *argv[])
 ~~~cpp
 static constexpr struct WFServerParams HTTP_SERVER_PARAMS_DEFAULT =
 {
+    .transport_type         =    TT_TCP,
     .max_connections        =    2000,
     .peer_response_timeout  =    10 * 1000,
     .receive_timeout        =    -1,
@@ -47,6 +48,7 @@ static constexpr struct WFServerParams HTTP_SERVER_PARAMS_DEFAULT =
     .ssl_accept_timeout     =    10 * 1000,
 };
 ~~~
+transport_type：传输层协议，默认为TCP。除了TT_TCP外，可选择的还有TT_UDP和Linux下支持的TT_SCTP。  
 max_connections：最大连接数2000，达到上限之后会关闭最久未使用的keep-alive连接。没找到keep-alive连接，则拒绝新连接。  
 peer_response_timeout：每读取到一块数据或发送出一块数据的超时时间为10秒。  
 receive_timeout：接收一条完整的请求超时时间为-1，无限。  
@@ -192,3 +194,4 @@ server任务的callback和client一样，是在http交互完成之后被调用�
 这里需要说明一下，回复消息的时机是在series里所有其它任务被执行完后，自动回复，所以并没有task->reply()接口。  
 但是，有task->noreply()调用，如果对server任务执行了这个调用，在原本回复的时刻，直接关闭连接。但callback依然会被调用（状态为NOREPLY）。  
 在server任务的callback里，同样可以通过series_of()操作获得任务的series。那么，我们依然可以往这个series里追加新任务，虽然回复已经完成。  
+

@@ -35,6 +35,10 @@ class WFRouterTask : public WFGenericTask
 public:
 	RouteManager::RouteResult *get_result() { return &this->result; }
 
+public:
+	void set_state(int state) { this->state = state; }
+	void set_error(int error) { this->error = error; }
+
 protected:
 	RouteManager::RouteResult result;
 	std::function<void (WFRouterTask *)> callback;
@@ -74,10 +78,12 @@ public:
 
 struct WFNSParams
 {
-	TransportType type;
+	enum TransportType type;
 	ParsedURI& uri;
 	const char *info;
+	SSL_CTX *ssl_ctx;
 	bool fixed_addr;
+	bool fixed_conn;
 	int retry_times;
 	WFNSTracing *tracing;
 };

@@ -16,21 +16,50 @@
   Authors: Wang Zhulei (wangzhulei@sogou-inc.com)
 */
 
-
 #include <errno.h>
 #include <assert.h>
+#include <algorithm>
 #include "KafkaDataTypes.h"
+
+#define MIN(x, y)	((x) <= (y) ? (x) : (y))
 
 namespace protocol
 {
 
-#define MIN(x, y)	((x) <= (y) ? (x) : (y))
-
-static int compare_member(const void *p1, const void *p2)
+std::string KafkaConfig::get_sasl_info() const
 {
-	kafka_member_t *member1 = (kafka_member_t *)p1;
-	kafka_member_t *member2 = (kafka_member_t *)p2;
-	return strcmp(member1->member_id, member2->member_id);
+	std::string info;
+
+	if (strcasecmp(this->ptr->mechanisms, "plain") == 0)
+	{
+		info += this->ptr->mechanisms;
+		info += "|";
+		info += this->ptr->username;
+		info += "|";
+		info += this->ptr->password;
+		info += "|";
+	}
+	else if (strncasecmp(this->ptr->mechanisms, "SCRAM", 5) == 0)
+	{
+		info += this->ptr->mechanisms;
+		info += "|";
+		info += this->ptr->username;
+		info += "|";
+		info += this->ptr->password;
+		info += "|";
+	}
+
+	return info;
+}
+
+static bool compare_member(const kafka_member_t *m1, const kafka_member_t *m2)
+{
+	return strcmp(m1->member_id, m2->member_id) < 0;
+}
+
+inline void KafkaMetaSubscriber::sort_by_member()
+{
+	std::sort(this->member_vec.begin(), this->member_vec.end(), compare_member);
 }
 
 static bool operator<(const KafkaMetaSubscriber& s1, const KafkaMetaSubscriber& s2)
@@ -114,7 +143,7 @@ int KafkaCgroup::kafka_roundrobin_assignor(kafka_member_t **members,
 	int next = -1;
 
 	std::sort(subscribers->begin(), subscribers->end());
-	qsort(members, member_elements, sizeof (kafka_member_t *), compare_member);
+	std::sort(members, members + member_elements, compare_member);
 
 	for (const auto& subscriber : *subscribers)
 	{
@@ -185,11 +214,11 @@ bool KafkaMeta::create_partitions(int partition_cnt)
 
 	if (i != partition_cnt)
 	{
-		do
+		while (--i >= 0)
 		{
 			kafka_partition_deinit(partitions[i]);
 			free(partitions[i]);
-		} while (--i >= 0);
+		}
 
 		free(partitions);
 		return false;
@@ -382,6 +411,8 @@ KafkaCgroup::KafkaCgroup(const KafkaCgroup& copy)
 
 	if (copy.coordinator)
 		this->coordinator = new KafkaBroker(copy.coordinator->get_raw_ptr());
+	else
+		this->coordinator = NULL;
 }
 
 KafkaCgroup& KafkaCgroup::operator= (const KafkaCgroup& copy)
@@ -393,6 +424,8 @@ KafkaCgroup& KafkaCgroup::operator= (const KafkaCgroup& copy)
 
 	if (copy.coordinator)
 		this->coordinator = new KafkaBroker(copy.coordinator->get_raw_ptr());
+	else
+		this->coordinator = NULL;
 
 	return *this;
 }
@@ -422,7 +455,7 @@ bool KafkaCgroup::create_members(int member_cnt)
 
 	if (i != member_cnt)
 	{
-		do
+		while (--i >= 0)
 		{
 			KafkaToppar *toppar;
 			struct list_head *pos, *tmp;
@@ -442,7 +475,7 @@ bool KafkaCgroup::create_members(int member_cnt)
 
 			kafka_member_deinit(members[i]);
 			free(members[i]);
-		} while (--i >= 0);
+		}
 
 		free(members);
 		return false;
@@ -558,7 +591,7 @@ void KafkaBuffer::list_splice(KafkaBuffer *buffer)
 	this->buf_size -= this->insert_buf_size;
 
 	pre_insert = this->insert_pos->next;
-	__list_splice(buffer->get_head(), this->insert_pos);
+	__list_splice(buffer->get_head(), this->insert_pos, pre_insert);
 
 	pre_tail = this->block_list.get_tail();
 	buffer->get_head()->prev->next = this->block_list.get_head();

@@ -27,7 +27,12 @@ namespace protocol
 class PackageWrapper : public ProtocolWrapper
 {
 private:
-	virtual ProtocolMessage *next(ProtocolMessage *msg)
+	virtual ProtocolMessage *next_out(ProtocolMessage *message)
+	{
+		return NULL;
+	}
+
+	virtual ProtocolMessage *next_in(ProtocolMessage *message)
 	{
 		return NULL;
 	}
@@ -37,7 +42,7 @@ protected:
 	virtual int append(const void *buf, size_t *size);
 
 public:
-	PackageWrapper(ProtocolMessage *msg) : ProtocolWrapper(msg)
+	PackageWrapper(ProtocolMessage *message) : ProtocolWrapper(message)
 	{
 	}
 
